@@ -3,7 +3,10 @@ package app.iptv.tv
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.os.Handler
@@ -97,6 +100,7 @@ class MainActivity : Activity() {
     private lateinit var etEpg: EditText
     private lateinit var etTz: EditText
     private lateinit var btType: Button
+    private lateinit var btSort: Button
     private lateinit var httpFactory: DefaultHttpDataSource.Factory
     private lateinit var etUa: EditText
     private lateinit var srvPanel: LinearLayout
@@ -109,7 +113,12 @@ class MainActivity : Activity() {
 
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("cfg", MODE_PRIVATE) }
-    private val types = listOf("shift", "flussonic", "append")
+    private val types = listOf("flussonic", "shift", "append")
+    private val sorts = listOf("list", "az", "fav", "custom")
+    private val sortNames = mapOf("list" to "как в плейлисте", "az" to "по алфавиту", "fav" to "избранные сверху", "custom" to "свой порядок")
+    private var sortMode = "list"
+    private var customOrder: MutableList<String> = ArrayList()   // свой порядок: названия каналов
+    private var moving = false                                    // режим перемещения канала в списке
     private var chans: List<Channel> = emptyList()
     private var groups: List<String> = emptyList()
     private var epg: Map<String, List<Prog>> = emptyMap()
@@ -125,7 +134,7 @@ class MainActivity : Activity() {
     private var dayOff = 0
     private var lastUrl = ""
     private var triedHls = false
-    private var ctype = "shift"
+    private var ctype = "flussonic"
     // автовосстановление потока
     private var retries = 0
     private var retryHls = false
@@ -200,7 +209,11 @@ class MainActivity : Activity() {
         favs = HashSet(prefs.getStringSet("fav", emptySet()) ?: emptySet())
         hiddenGroups = HashSet(prefs.getStringSet("hg", emptySet()) ?: emptySet())
         buildHud(); buildPanels(); buildSetup(); buildServers(); buildGroupMgr(); buildToast()
-        ctype = prefs.getString("ct", "shift") ?: "shift"
+        // тип архива по умолчанию — flussonic (один раз переводим и ранее сохранённое значение по умолчанию)
+        if (prefs.getInt("ctv", 0) < 1) prefs.edit().putString("ct", "flussonic").putInt("ctv", 1).apply()
+        ctype = prefs.getString("ct", "flussonic") ?: "flussonic"
+        sortMode = prefs.getString("sort", "list") ?: "list"
+        customOrder = (prefs.getString("order", "") ?: "").split("\n").filter { it.isNotEmpty() }.toMutableList()
         if (prefs.getString("pl", "").isNullOrEmpty()) {
             val d = getString(R.string.default_playlist)
             if (d.isNotEmpty()) {
@@ -276,7 +289,7 @@ class MainActivity : Activity() {
     private fun buildPanels() {
         grpList = lv(); chList = lv(); dayList = lv(); progList = lv()
         (chList.adapter as RowAdapter).icons = true
-        chPanel = panel(TextView(this).apply { text = "Каналы" }, grpList, chList, 0.62f, Gravity.START)
+        chPanel = panel(TextView(this).apply { text = "Каналы   ·   зелёная / # — переместить" }, grpList, chList, 0.62f, Gravity.START)
         arTitle = TextView(this)
         arPanel = panel(arTitle, dayList, progList, 0.62f, Gravity.END)
 
@@ -333,24 +346,57 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Фон с заметной рамкой и цветом в фокусе (для навигации пультом). */
+    private fun focusBg(normal: Int, stroke: Int, fill: Int): StateListDrawable {
+        fun shape(f: Int, st: Int, w: Int) = GradientDrawable().apply { setColor(f); setStroke(dp(w), st); cornerRadius = dp(8).toFloat() }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), shape(fill, 0xFF6FE3C1.toInt(), 3))
+            addState(intArrayOf(), shape(normal, stroke, 1))
+        }
+    }
+
+    /** Кнопка для ТВ: тёмная, а в фокусе — яркая бирюзовая с тёмным текстом и белой рамкой. */
+    private fun tvButton(t: String): Button = Button(this).apply {
+        text = t; textSize = 18f; isAllCaps = false
+        stateListAnimator = null
+        gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        minHeight = dp(52); minimumHeight = dp(52)
+        setPadding(dp(18), dp(8), dp(18), dp(8))
+        setTextColor(ColorStateList(
+            arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf(android.R.attr.state_pressed), intArrayOf()),
+            intArrayOf(0xFF06231B.toInt(), 0xFF06231B.toInt(), Color.WHITE)))
+        fun shape(f: Int, st: Int, w: Int) = GradientDrawable().apply { setColor(f); setStroke(dp(w), st); cornerRadius = dp(8).toFloat() }
+        background = StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), shape(0xFF6FE3C1.toInt(), Color.WHITE, 4))
+            addState(intArrayOf(android.R.attr.state_pressed), shape(0xFF6FE3C1.toInt(), Color.WHITE, 4))
+            addState(intArrayOf(), shape(0xFF26323B.toInt(), 0xFF3A4A54.toInt(), 1))
+        }
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+    }
+
     private fun buildSetup() {
         fun field(h: String) = EditText(this).apply {
             setTextColor(Color.WHITE); setHintTextColor(0xFF667780.toInt()); hint = h
             setSingleLine(); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            background = focusBg(0xFF1B252C.toInt(), 0xFF3A4A54.toInt(), 0xFF24343D.toInt())
+            setPadding(dp(14), dp(10), dp(14), dp(10))
         }
         fun label(t: String) = TextView(this).apply { text = t; textSize = 16f; setTextColor(0xFF8A9AA5.toInt()); setPadding(0, dp(14), 0, 0) }
         etPl = field("http://…/playlist.m3u")
         etEpg = field("http://…/epg.xml.gz (необязательно)")
         etTz = field("0").apply { inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED }
-        btType = Button(this).apply {
+        btType = tvButton("").apply {
             setOnClickListener { ctype = types[(types.indexOf(ctype) + 1) % types.size]; text = "Тип архива: $ctype" }
         }
-        val save = Button(this).apply { text = "Сохранить и загрузить"; setOnClickListener { saveSetup() } }
-        val cancel = Button(this).apply { text = "Отмена"; setOnClickListener { if (chans.isNotEmpty()) closePanels() } }
+        btSort = tvButton("").apply {
+            setOnClickListener { setSort(sorts[(sorts.indexOf(sortMode) + 1) % sorts.size]) }
+        }
+        val save = tvButton("Сохранить и загрузить").apply { setOnClickListener { saveSetup() } }
+        val cancel = tvButton("Отмена").apply { setOnClickListener { if (chans.isNotEmpty()) closePanels() } }
         etUa = field("пусто = автоподбор (VLC, okhttp, Mozilla…)")
         tvStat = TextView(this).apply { textSize = 16f; setTextColor(0xFF6FE3C1.toInt()); setPadding(0, dp(14), 0, dp(6)) }
-        val btSrv = Button(this).apply { text = "Выбрать сервер из списка"; setOnClickListener { openServers() } }
-        val btFile = Button(this).apply { text = "Загрузить список / плейлист из файла…"; setOnClickListener { pickFile() } }
+        val btSrv = tvButton("Выбрать сервер из списка").apply { setOnClickListener { openServers() } }
+        val btFile = tvButton("Загрузить список / плейлист из файла…").apply { setOnClickListener { pickFile() } }
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(60), dp(30), dp(60), dp(30))
@@ -360,6 +406,7 @@ class MainActivity : Activity() {
             addView(label("Часовой пояс программы, часы от UTC (если не указан в EPG)")); addView(etTz)
             addView(label("User-Agent (если сервер отвечает 403)")); addView(etUa)
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
+            addView(label("Порядок каналов")); addView(btSort)
             addView(tvStat); addView(btSrv); addView(btFile); addView(save); addView(cancel)
         }
         setup = ScrollView(this).apply { setBackgroundColor(0xFF0F1519.toInt()); visibility = View.GONE; addView(col) }
@@ -412,11 +459,59 @@ class MainActivity : Activity() {
         return l
     }
 
+    /** Каналы в выбранном порядке (сортировка устойчивая: равные остаются в порядке плейлиста). */
+    private fun ordered(): List<Channel> = when (sortMode) {
+        "az" -> chans.sortedBy { it.name.lowercase() }
+        "fav" -> chans.sortedBy { if (isFav(it)) 0 else 1 }
+        "custom" -> { val pos = HashMap<String, Int>(); customOrder.forEachIndexed { i, n -> pos.putIfAbsent(n, i) }; chans.sortedBy { pos[it.name] ?: Int.MAX_VALUE } }
+        else -> chans
+    }
+
+    private fun setSort(m: String) {
+        sortMode = m
+        if (m == "custom" && customOrder.isEmpty()) { customOrder = chans.map { it.name }.toMutableList(); saveOrder() }
+        prefs.edit().putString("sort", m).apply()
+        zap = emptyList()
+        btSort.text = "Порядок каналов: ${sortNames[m]}"
+    }
+
+    private fun saveOrder() = prefs.edit().putString("order", customOrder.joinToString("\n")).apply()
+
+    /** Зелёная кнопка / «#»: включает режим перемещения выбранного канала (↑/↓ — двигать, OK — готово). */
+    private fun startMove() {
+        val pos = chList.selectedItemPosition
+        if (pos < 0 || pos >= shown.size) return
+        if (sortMode != "custom") {
+            customOrder = ordered().map { it.name }.toMutableList(); saveOrder()
+            setSort("custom")
+        } else {
+            // добавляем в свой порядок новые каналы, которых там ещё нет
+            val known = customOrder.toHashSet(); chans.forEach { if (known.add(it.name)) customOrder.add(it.name) }
+        }
+        moving = true
+        renderChans(); chList.setSelection(pos)
+        toast("Перемещение: ↑/↓ — двигать, OK — готово")
+    }
+
+    private fun moveBy(d: Int) {
+        val pos = chList.selectedItemPosition; val t = pos + d
+        if (pos < 0 || t < 0 || t >= shown.size) return
+        val a = customOrder.indexOf(shown[pos].name); val b = customOrder.indexOf(shown[t].name)
+        if (a < 0 || b < 0) return
+        val x = customOrder[a]; customOrder[a] = customOrder[b]; customOrder[b] = x
+        saveOrder(); zap = emptyList()
+        renderChans(); chList.setSelection(t)
+    }
+
+    private fun stopMove() { moving = false; zap = emptyList(); renderChans(); toast("Порядок сохранён") }
+
     private fun renderChans() {
-        shown = if (grp == G_FAV) chans.filter { isFav(it) }
-        else if (grp == G_ALL) chans.filter { it.group !in hiddenGroups }
-        else chans.filter { it.group == grp }
-        ad(chList).set(shown.map { Row((if (it === cur) "▶ " else "") + (if (isFav(it)) "★ " else "") + it.name, nowProg(it)?.title ?: "", it, false, it.logo) })
+        val all = ordered()
+        shown = if (grp == G_FAV) all.filter { isFav(it) }
+        else if (grp == G_ALL) all.filter { it.group !in hiddenGroups }
+        else all.filter { it.group == grp }
+        val sel = if (moving) chList.selectedItemPosition else -1
+        ad(chList).set(shown.mapIndexed { i, it -> Row((if (i == sel) "⇅ " else if (it === cur) "▶ " else "") + (if (isFav(it)) "★ " else "") + it.name, nowProg(it)?.title ?: "", it, false, it.logo) })
     }
 
     /* ---------- избранное и скрытые группы ---------- */
@@ -519,6 +614,7 @@ class MainActivity : Activity() {
         etTz.setText(prefs.getInt("tz", 0).toString())
         etUa.setText(prefs.getString("ua", ""))
         btType.text = "Тип архива: $ctype"
+        btSort.text = "Порядок каналов: ${sortNames[sortMode]}"
         tvStat.text = "Программа передач: $epgStatus"
         showPanel(setup)
         etPl.requestFocus()
@@ -579,8 +675,9 @@ class MainActivity : Activity() {
     /** ↑/↓: листаем по списку, выбранному в панели (группа / избранное); пока не выбран — по всем нескрытым каналам. */
     private fun step(d: Int) {
         var l = zap
-        if (l.isEmpty()) l = chans.filter { it.group !in hiddenGroups }
-        if (l.isEmpty()) l = chans
+        val all = ordered()
+        if (l.isEmpty()) l = all.filter { it.group !in hiddenGroups }
+        if (l.isEmpty()) l = all
         if (l.isEmpty()) return
         val i = l.indexOfFirst { it === cur }
         val n = if (i < 0) (if (d > 0) 0 else l.size - 1) else (i + d + l.size) % l.size
@@ -735,6 +832,18 @@ class MainActivity : Activity() {
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         val k = e.keyCode
         if (panelOpen()) {
+            if (moving) {
+                if (chPanel.visibility != View.VISIBLE) moving = false
+                else {
+                    when (k) {
+                        KeyEvent.KEYCODE_DPAD_UP -> { if (e.action == KeyEvent.ACTION_DOWN) moveBy(-1); return true }
+                        KeyEvent.KEYCODE_DPAD_DOWN -> { if (e.action == KeyEvent.ACTION_DOWN) moveBy(1); return true }
+                        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BACK,
+                        KeyEvent.KEYCODE_PROG_GREEN, KeyEvent.KEYCODE_POUND -> { if (e.action == KeyEvent.ACTION_UP) stopMove(); return true }
+                        else -> return true
+                    }
+                }
+            }
             if (k == KeyEvent.KEYCODE_BACK) {
                 if (setup.visibility == View.VISIBLE && chans.isEmpty()) return super.dispatchKeyEvent(e)
                 if (e.action == KeyEvent.ACTION_UP) {
@@ -748,6 +857,10 @@ class MainActivity : Activity() {
             if (chPanel.visibility == View.VISIBLE && chList.hasFocus() &&
                 (k == KeyEvent.KEYCODE_MENU || k == KeyEvent.KEYCODE_STAR || k == KeyEvent.KEYCODE_PROG_YELLOW)) {
                 if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) favAt(chList.selectedItemPosition)
+                return true
+            }
+            if (chPanel.visibility == View.VISIBLE && chList.hasFocus() && (k == KeyEvent.KEYCODE_PROG_GREEN || k == KeyEvent.KEYCODE_POUND)) {
+                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) startMove()
                 return true
             }
             return super.dispatchKeyEvent(e)
