@@ -102,6 +102,9 @@ class MainActivity : Activity() {
     private lateinit var srvPanel: LinearLayout
     private lateinit var srvList: ListView
     private lateinit var tvStat: TextView
+    private lateinit var hudLogo: ImageView
+    private lateinit var gmPanel: LinearLayout
+    private lateinit var gmList: ListView
     private var epgStatus = "не загружена"
 
     private val ui = Handler(Looper.getMainLooper())
@@ -111,7 +114,12 @@ class MainActivity : Activity() {
     private var groups: List<String> = emptyList()
     private var epg: Map<String, List<Prog>> = emptyMap()
     private var shown: List<Channel> = emptyList()
-    private var grp = "Все"
+    private val G_ALL = "Все"
+    private val G_FAV = "★ Избранное"
+    private var grp = G_ALL
+    private var favs: MutableSet<String> = HashSet()          // избранные каналы (по названию), общие для всех плейлистов
+    private var hiddenGroups: MutableSet<String> = HashSet()  // скрытые группы (по названию)
+    private var zap: List<Channel> = emptyList()              // список, по которому листают ↑/↓ (группа, выбранная в панели)
     private var cur: Channel? = null
     private var arch: Prog? = null
     private var dayOff = 0
@@ -189,7 +197,9 @@ class MainActivity : Activity() {
         pv.setOnClickListener { if (!panelOpen()) openChans() }
         root.addView(pv, FrameLayout.LayoutParams(-1, -1))
 
-        buildHud(); buildPanels(); buildSetup(); buildServers(); buildToast()
+        favs = HashSet(prefs.getStringSet("fav", emptySet()) ?: emptySet())
+        hiddenGroups = HashSet(prefs.getStringSet("hg", emptySet()) ?: emptySet())
+        buildHud(); buildPanels(); buildSetup(); buildServers(); buildGroupMgr(); buildToast()
         ctype = prefs.getString("ct", "shift") ?: "shift"
         if (prefs.getString("pl", "").isNullOrEmpty()) {
             val d = getString(R.string.default_playlist)
@@ -203,14 +213,26 @@ class MainActivity : Activity() {
     /* ---------- интерфейс ---------- */
     private fun buildHud() {
         hudBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(0xDD101519.toInt())
             setPadding(dp(24), dp(14), dp(24), dp(14))
             visibility = View.GONE
         }
+        // значок канала слева от названия; полупрозрачная подложка, чтобы читались и тёмные, и светлые логотипы
+        hudLogo = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(0x44FFFFFF)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            visibility = View.GONE
+        }
+        val lpLogo = LinearLayout.LayoutParams(dp(104), dp(64))
+        lpLogo.rightMargin = dp(18)
+        hudBox.addView(hudLogo, lpLogo)
         hudT = TextView(this).apply { textSize = 26f; setTextColor(Color.WHITE) }
         hudP = TextView(this).apply { textSize = 18f; setTextColor(0xFF6FE3C1.toInt()) }
-        hudBox.addView(hudT); hudBox.addView(hudP)
+        val hudCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(hudT); addView(hudP) }
+        hudBox.addView(hudCol, LinearLayout.LayoutParams(0, -2, 1f))
         val lp = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM)
         lp.setMargins(dp(40), 0, dp(40), dp(32))
         root.addView(hudBox, lp)
@@ -259,13 +281,38 @@ class MainActivity : Activity() {
         arPanel = panel(arTitle, dayList, progList, 0.62f, Gravity.END)
 
         grpList.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
-            if (pos == 0) openSetup() else if (pos == 1) openServers() else {
-                grp = ad(grpList).row(pos).title
-                renderChans(); chList.requestFocus()
+            val r = ad(grpList).row(pos)
+            when (r.tag) {
+                "set" -> openSetup()
+                "srv" -> openServers()
+                "mgr" -> openGroupMgr()
+                else -> {
+                    grp = r.title
+                    renderChans()
+                    if (shown.isEmpty()) toast(if (grp == G_FAV) "Избранное пусто. Удерживайте OK на канале" else "В группе нет каналов")
+                    else chList.requestFocus()
+                }
             }
         }
+        // удержание OK на группе — скрыть её
+        grpList.onItemLongClickListener = AdapterView.OnItemLongClickListener { _, _, pos, _ ->
+            val r = ad(grpList).row(pos)
+            if (r.tag == "g") {
+                toggleGroup(r.title)
+                toast("Группа скрыта: ${r.title}. Вернуть: ☰ Группы…")
+                ad(grpList).set(groupRows())
+                renderChans()
+                grpList.setSelection(minOf(pos, ad(grpList).getCount() - 1))
+            }
+            true
+        }
         chList.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
-            if (pos < shown.size) { playChan(shown[pos]); closePanels() }
+            if (pos < shown.size) { zap = shown; playChan(shown[pos]); closePanels() }
+        }
+        // удержание OK на канале — в избранное / из избранного
+        chList.onItemLongClickListener = AdapterView.OnItemLongClickListener { _, _, pos, _ ->
+            favAt(pos)
+            true
         }
         dayList.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) { dayOff = pos; renderProgs() }
@@ -321,11 +368,12 @@ class MainActivity : Activity() {
 
     private fun showPanel(p: View?) {
         chPanel.visibility = View.GONE; arPanel.visibility = View.GONE; setup.visibility = View.GONE; srvPanel.visibility = View.GONE
+        gmPanel.visibility = View.GONE
         hudBox.visibility = View.GONE
         p?.visibility = View.VISIBLE
     }
     private fun closePanels() = showPanel(null)
-    private fun panelOpen() = chPanel.visibility == View.VISIBLE || arPanel.visibility == View.VISIBLE || setup.visibility == View.VISIBLE || srvPanel.visibility == View.VISIBLE
+    private fun panelOpen() = chPanel.visibility == View.VISIBLE || arPanel.visibility == View.VISIBLE || setup.visibility == View.VISIBLE || srvPanel.visibility == View.VISIBLE || gmPanel.visibility == View.VISIBLE
 
     private fun toast(t: String) {
         toastTv.text = t; toastTv.visibility = View.VISIBLE
@@ -336,7 +384,8 @@ class MainActivity : Activity() {
         val c = cur ?: return
         val a = arch
         val p = a ?: nowProg(c)
-        hudT.text = c.name + if (a != null) "  ·  архив" else ""
+        hudT.text = (if (isFav(c)) "★ " else "") + c.name + if (a != null) "  ·  архив" else ""
+        Logos.load(hudLogo, c.logo, true)
         hudP.text = if (p != null) "${hm(p.s)}–${hm(p.e)}  ${p.title}" else ""
         hudBox.visibility = View.VISIBLE
         ui.removeCallbacks(hideHud); ui.postDelayed(hideHud, 4500)
@@ -344,16 +393,89 @@ class MainActivity : Activity() {
 
     /* ---------- панели ---------- */
     private fun openChans() {
-        ad(grpList).set((listOf("⚙ Настройки", "⇄ Сервер", "Все") + groups).map { Row(it) })
+        ad(grpList).set(groupRows())
         renderChans()
         showPanel(chPanel)
         chList.setSelection(shown.indexOfFirst { it === cur }.coerceAtLeast(0))
         chList.requestFocus()
     }
 
+    private fun groupRows(): List<Row> {
+        val hid = groups.count { it in hiddenGroups }
+        val l = ArrayList<Row>()
+        l.add(Row("⚙ Настройки", tag = "set"))
+        l.add(Row("⇄ Сервер", tag = "srv"))
+        l.add(Row("☰ Группы…", if (hid > 0) "скрыто: $hid" else "", "mgr"))
+        l.add(Row(G_FAV, tag = "fav"))
+        l.add(Row(G_ALL, tag = "all"))
+        for (g in groups) if (g !in hiddenGroups) l.add(Row(g, tag = "g"))
+        return l
+    }
+
     private fun renderChans() {
-        shown = chans.filter { grp == "Все" || it.group == grp }
-        ad(chList).set(shown.map { Row((if (it === cur) "▶ " else "") + it.name, nowProg(it)?.title ?: "", it, false, it.logo) })
+        shown = if (grp == G_FAV) chans.filter { isFav(it) }
+        else if (grp == G_ALL) chans.filter { it.group !in hiddenGroups }
+        else chans.filter { it.group == grp }
+        ad(chList).set(shown.map { Row((if (it === cur) "▶ " else "") + (if (isFav(it)) "★ " else "") + it.name, nowProg(it)?.title ?: "", it, false, it.logo) })
+    }
+
+    /* ---------- избранное и скрытые группы ---------- */
+    private fun isFav(c: Channel) = c.name in favs
+
+    private fun toggleFav(c: Channel) {
+        if (!favs.remove(c.name)) favs.add(c.name)
+        prefs.edit().putStringSet("fav", HashSet(favs)).apply()
+        toast(if (isFav(c)) "★ В избранное: ${c.name}" else "Убрано из избранного: ${c.name}")
+    }
+
+    /** Переключает избранное у канала с номером [pos] в текущем списке и сохраняет позицию в списке. */
+    private fun favAt(pos: Int) {
+        if (pos < 0 || pos >= shown.size) return
+        toggleFav(shown[pos])
+        renderChans()
+        chList.setSelection(minOf(pos, maxOf(shown.size - 1, 0)))
+    }
+
+    private fun toggleGroup(g: String) {
+        if (!hiddenGroups.remove(g)) hiddenGroups.add(g)
+        prefs.edit().putStringSet("hg", HashSet(hiddenGroups)).apply()
+        if (g in hiddenGroups && grp == g) grp = G_ALL
+        zap = emptyList()
+    }
+
+    private fun buildGroupMgr() {
+        gmList = lv()
+        gmPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xF2101519.toInt())
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+            visibility = View.GONE
+            addView(TextView(this@MainActivity).apply { text = "Группы каналов — OK: показать / скрыть"; textSize = 24f; setTextColor(Color.WHITE); setPadding(0, 0, 0, dp(10)) })
+            addView(gmList, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        root.addView(gmPanel, FrameLayout.LayoutParams((resources.displayMetrics.widthPixels * 0.6f).toInt(), -1, Gravity.CENTER_HORIZONTAL))
+        gmList.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
+            val g = ad(gmList).row(pos).tag as? String
+            if (g != null) {
+                toggleGroup(g)
+                renderGroupMgr()
+                gmList.setSelection(pos)
+            }
+        }
+    }
+
+    private fun renderGroupMgr() {
+        ad(gmList).set(groups.map { g ->
+            val hid = g in hiddenGroups
+            Row((if (hid) "✗  " else "✓  ") + g, "каналов: " + chans.count { it.group == g } + (if (hid) " · скрыта" else ""), g, hid)
+        })
+    }
+
+    private fun openGroupMgr() {
+        if (groups.isEmpty()) { toast("Групп нет"); return }
+        renderGroupMgr()
+        showPanel(gmPanel)
+        gmList.requestFocus()
     }
 
     private fun openArch() {
@@ -454,9 +576,15 @@ class MainActivity : Activity() {
         toast("Архив: " + hm(p.s) + " " + p.title)
     }
 
+    /** ↑/↓: листаем по списку, выбранному в панели (группа / избранное); пока не выбран — по всем нескрытым каналам. */
     private fun step(d: Int) {
-        if (chans.isEmpty()) return
-        playChan(chans[((cur?.idx ?: 0) + d + chans.size) % chans.size])
+        var l = zap
+        if (l.isEmpty()) l = chans.filter { it.group !in hiddenGroups }
+        if (l.isEmpty()) l = chans
+        if (l.isEmpty()) return
+        val i = l.indexOfFirst { it === cur }
+        val n = if (i < 0) (if (d > 0) 0 else l.size - 1) else (i + d + l.size) % l.size
+        playChan(l[n])
     }
 
     /* ---------- серверы и файлы ---------- */
@@ -562,7 +690,8 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     chans = list.ch
                     groups = list.ch.map { it.group }.distinct()
-                    grp = "Все"
+                    grp = G_ALL
+                    zap = emptyList()
                     toast(if (fromCache) "Сервер недоступен — показан сохранённый список: ${list.ch.size}" else "Каналов: ${list.ch.size}")
                     playChan(list.ch.getOrElse(prefs.getInt("last", 0)) { list.ch[0] })
                 }
@@ -608,7 +737,17 @@ class MainActivity : Activity() {
         if (panelOpen()) {
             if (k == KeyEvent.KEYCODE_BACK) {
                 if (setup.visibility == View.VISIBLE && chans.isEmpty()) return super.dispatchKeyEvent(e)
-                if (e.action == KeyEvent.ACTION_UP) { if (srvPanel.visibility == View.VISIBLE) openSetup() else closePanels() }
+                if (e.action == KeyEvent.ACTION_UP) {
+                    if (srvPanel.visibility == View.VISIBLE) openSetup()
+                    else if (gmPanel.visibility == View.VISIBLE) openChans()
+                    else closePanels()
+                }
+                return true
+            }
+            // запасные клавиши избранного в списке каналов: Меню, «*», жёлтая
+            if (chPanel.visibility == View.VISIBLE && chList.hasFocus() &&
+                (k == KeyEvent.KEYCODE_MENU || k == KeyEvent.KEYCODE_STAR || k == KeyEvent.KEYCODE_PROG_YELLOW)) {
+                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) favAt(chList.selectedItemPosition)
                 return true
             }
             return super.dispatchKeyEvent(e)
@@ -618,7 +757,8 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
             KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_PAGE_DOWN,
             KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_INFO, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_REWIND
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_REWIND,
+            KeyEvent.KEYCODE_PROG_RED, KeyEvent.KEYCODE_STAR
         )
         if (k !in live) return super.dispatchKeyEvent(e)
         if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) onLiveKey(k)
@@ -634,6 +774,7 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> step(1)
             KeyEvent.KEYCODE_MENU -> openSetup()
             KeyEvent.KEYCODE_INFO -> hud()
+            KeyEvent.KEYCODE_PROG_RED, KeyEvent.KEYCODE_STAR -> cur?.let { toggleFav(it); hud() }
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> player.playWhenReady = !player.playWhenReady
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> player.seekTo(player.currentPosition + 30000)
             KeyEvent.KEYCODE_MEDIA_REWIND -> player.seekTo(maxOf(0L, player.currentPosition - 30000))

@@ -11,7 +11,7 @@ android {
         targetSdk = 34
         // В GitHub Actions versionCode растёт с каждым запуском, локально = 1
         versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
-        versionName = "1.1"
+        versionName = "1.2"
     }
     // Постоянный ключ: без него каждая сборка в Actions подписывается новым
     // случайным ключом, и обновление поверх установленного приложения не ставится.
