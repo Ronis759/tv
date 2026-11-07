@@ -146,6 +146,8 @@ class MainActivity : Activity() {
     private var arch: Prog? = null
     private var dayOff = 0
     private var lastUrl = ""
+    private var arcCands: List<Pair<Int, String>> = emptyList()   // варианты ссылки на архив
+    private var arcIdx = 0
     private var triedHls = false
     private var ctype = "flussonic"
     // автовосстановление потока
@@ -192,7 +194,12 @@ class MainActivity : Activity() {
                 ui.removeCallbacks(stallRun)
                 when (state) {
                     Player.STATE_BUFFERING -> ui.postDelayed(stallRun, 20000)
-                    Player.STATE_READY -> { readyMode = triedHls; retries = 0 }
+                    Player.STATE_READY -> {
+                        readyMode = triedHls; retries = 0
+                        // запоминаем рабочий формат архива для этого сервера
+                        val cc = cur
+                        if (arch != null && cc != null && arcIdx in arcCands.indices) prefs.edit().putInt("arcv_" + Iptv.hostOf(cc.url), arcCands[arcIdx].first).apply()
+                    }
                     // сервер закрыл соединение с прямым эфиром — переподключаемся
                     Player.STATE_ENDED -> if (arch == null && lastUrl.isNotEmpty()) scheduleRetry()
                 }
@@ -208,6 +215,14 @@ class MainActivity : Activity() {
                 val netErr = error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
                     error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
                     error.errorCode == PlaybackException.ERROR_CODE_TIMEOUT
+                // архив не открылся — пробуем следующий формат ссылки
+                if (arch != null && !netErr && arcIdx + 1 < arcCands.size) {
+                    arcIdx++
+                    ui.removeCallbacks(retryRun); retries = 0; readyMode = null
+                    toast("Архив: пробую другой формат ($arcIdx из ${arcCands.size - 1})…")
+                    playUrl(arcCands[arcIdx].second)
+                    return
+                }
                 if ((arch == null || netErr) && scheduleRetry()) return
                 toast(if (arch != null) "Архив не воспроизводится (тип: ${archType()}) — смените тип в настройках. " + error.errorCodeName else "Ошибка воспроизведения: " + error.errorCodeName)
             }
@@ -319,6 +334,7 @@ class MainActivity : Activity() {
                 "set" -> openSetup()
                 "srv" -> openServers()
                 "mgr" -> openGroupMgr()
+                "arc" -> if (cur != null) openArch() else toast("Сначала выберите канал")
                 else -> {
                     grp = r.title
                     ad(grpList).active = grp
@@ -350,8 +366,8 @@ class MainActivity : Activity() {
                 val c = shown[pos]
                 android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
                     .setTitle(c.name)
-                    .setItems(arrayOf(if (isFav(c)) "★ Убрать из избранного" else "★ В избранное", "⇅ Переместить (↑/↓)")) { _, w ->
-                        if (w == 0) favAt(pos) else startMove(pos)
+                    .setItems(arrayOf(if (isFav(c)) "★ Убрать из избранного" else "★ В избранное", "⇅ Переместить (↑/↓)", "⏪ Архив канала")) { _, w ->
+                        if (w == 0) favAt(pos) else if (w == 1) startMove(pos) else { zap = shown; playChan(c); closePanels(); openArch() }
                     }.show()
             }
             true
@@ -498,6 +514,7 @@ class MainActivity : Activity() {
         val hid = groups.count { it in hiddenGroups }
         val l = ArrayList<Row>()
         l.add(Row("⚙ Настройки", tag = "set", short = "⚙"))
+        l.add(Row("⏪ Архив", "канала: " + (cur?.name ?: "—"), "arc", short = "⏪"))
         l.add(Row("☰ Группы…", if (hid > 0) "скрыто: $hid" else "", "mgr", short = "☰"))
         l.add(Row(G_FAV, tag = "fav", short = "★"))
         l.add(Row(G_ALL, tag = "all", short = "▤"))
@@ -703,7 +720,7 @@ class MainActivity : Activity() {
     }
 
     private fun playChan(c: Channel) {
-        cur = c; arch = null
+        cur = c; arch = null; arcCands = emptyList()
         prefs.edit().putInt("last", c.idx).apply()
         startUrl(c.url)
         hud()
@@ -712,7 +729,10 @@ class MainActivity : Activity() {
     private fun playArch(p: Prog) {
         val c = cur ?: return
         arch = p
-        startUrl(Iptv.arcUrl(c, p.s, p.e, ctype))
+        val pref = prefs.getInt("arcv_" + Iptv.hostOf(c.url), -1)
+        arcCands = Iptv.arcCandidates(c, p.s, p.e, ctype).sortedByDescending { it.first == pref }
+        arcIdx = 0
+        startUrl(arcCands[0].second)
         hud()
         toast("Архив: " + hm(p.s) + " " + p.title)
     }
@@ -937,6 +957,11 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_REWIND,
             KeyEvent.KEYCODE_PROG_RED, KeyEvent.KEYCODE_STAR
         )
+        // «Назад» во время архива — возврат в прямой эфир
+        if (k == KeyEvent.KEYCODE_BACK && arch != null && cur != null) {
+            if (e.action == KeyEvent.ACTION_UP) { playChan(cur!!); toast("Прямой эфир") }
+            return true
+        }
         if (k !in live) return super.dispatchKeyEvent(e)
         if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) onLiveKey(k)
         return true
@@ -945,7 +970,7 @@ class MainActivity : Activity() {
     private fun onLiveKey(k: Int) {
         when (k) {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> openChans()
-            KeyEvent.KEYCODE_DPAD_LEFT -> openArch()
+            KeyEvent.KEYCODE_DPAD_LEFT -> if (arch != null) player.seekTo(maxOf(0L, player.currentPosition - 30000)) else openArch()
             KeyEvent.KEYCODE_DPAD_RIGHT -> if (arch != null) player.seekTo(player.currentPosition + 30000) else openArch()
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_PAGE_UP -> step(-1)
             KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> step(1)

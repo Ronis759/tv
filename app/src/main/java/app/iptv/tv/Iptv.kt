@@ -183,6 +183,26 @@ object Iptv {
         return url + (if (url.contains('?')) "&" else "?") + "utc=$s&lutc=$n"
     }
 
+    /**
+     * Варианты ссылки на архив в порядке попыток: сначала по правилам плейлиста/типа архива,
+     * затем типичные форматы Flussonic. Число — устойчивый номер формата (запоминается для сервера).
+     */
+    fun arcCandidates(c: Channel, s: Long, e: Long, def: String): List<Pair<Int, String>> {
+        val n = System.currentTimeMillis() / 1000
+        val d = e - s
+        val url = c.url
+        val p = url.substringBefore('?')
+        val q = if (url.contains('?')) "?" + url.substringAfter('?') else ""
+        val b = p.substringBeforeLast('/')
+        val l = ArrayList<Pair<Int, String>>()
+        l.add(0 to arcUrl(c, s, e, def))
+        l.add(1 to url + (if (url.contains('?')) "&" else "?") + "utc=$s&lutc=$n")
+        l.add(2 to "$b/video-$s-$d.m3u8$q")
+        l.add(3 to "$b/index-$s-$d.m3u8$q")
+        if (p.contains("mpegts") || p.endsWith(".ts")) l.add(4 to "$b/timeshift_abs-$s.ts$q")
+        return l.distinctBy { it.second }
+    }
+
     private val XR = Regex("""^(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)?\s*([+-]\d{4})?""")
 
     private fun xt(s: String?, tz: Int): Long {
