@@ -268,6 +268,55 @@ class MainActivity : Activity() {
                 loadAll()
             } else if (allServers().isNotEmpty()) openServers() else openSetup()
         } else loadAll()
+        checkUpdate(false)
+    }
+
+    /* ---------- обновление из GitHub Releases ---------- */
+    /** [manual] = false: тихая проверка при запуске (не чаще раза в 6 часов, молчит, если обновлений нет или сеть недоступна). */
+    private fun checkUpdate(manual: Boolean) {
+        val repo = getString(R.string.github_repo).trim()
+        if (repo.isEmpty()) { if (manual) toast("Не задан репозиторий: впишите github_repo в strings.xml"); return }
+        if (!manual && now() - prefs.getLong("upd_t", 0) < 6 * 3600) return
+        if (manual) toast("Проверка обновлений…")
+        Thread {
+            try {
+                val info = Updater.fetch(repo)
+                prefs.edit().putLong("upd_t", now()).apply()
+                val mine = Updater.installedCode(this)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (info != null && info.code > mine) askUpdate(info, mine)
+                    else if (manual) toast("Установлена последняя версия ($mine)")
+                }
+            } catch (e: Exception) {
+                if (manual) runOnUiThread { toast("Не удалось проверить обновления: " + e.message) }
+            }
+        }.start()
+    }
+
+    private fun askUpdate(info: Updater.Info, mine: Long) {
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Доступна версия ${info.code}")
+            .setMessage("Установлена: $mine. Скачать и установить обновление?")
+            .setPositiveButton("Обновить") { _, _ -> downloadUpdate(info) }
+            .setNegativeButton("Позже", null)
+            .show()
+    }
+
+    private fun downloadUpdate(info: Updater.Info) {
+        toast("Загрузка обновления…")
+        Thread {
+            try {
+                val f = Updater.download(this, info)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    val err = Updater.install(this, f)
+                    if (err != null) toast(err)
+                }
+            } catch (e: Exception) {
+                runOnUiThread { toast("Не удалось скачать обновление: " + e.message) }
+            }
+        }.start()
     }
 
     /* ---------- интерфейс ---------- */
@@ -546,6 +595,7 @@ class MainActivity : Activity() {
         }
         val btSrv = tvButton("Выбрать сервер из списка").apply { setOnClickListener { openServers() } }
         val btFile = tvButton("Загрузить список / плейлист из файла…").apply { setOnClickListener { pickFile() } }
+        val btUpd = tvButton("Проверить обновления").apply { setOnClickListener { checkUpdate(true) } }
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(60), dp(30), dp(60), dp(30))
@@ -557,7 +607,7 @@ class MainActivity : Activity() {
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
             addView(label("Порядок каналов")); addView(btSort)
             addView(label("Список при запуске")); addView(btStart)
-            addView(tvStat); addView(btEpg); addView(btSrv); addView(btFile); addView(save); addView(cancel)
+            addView(tvStat); addView(btEpg); addView(btSrv); addView(btFile); addView(btUpd); addView(save); addView(cancel)
         }
         setup = ScrollView(this).apply { setBackgroundColor(0xFF0F1519.toInt()); visibility = View.GONE; addView(col) }
         root.addView(setup, FrameLayout.LayoutParams(-1, -1))
