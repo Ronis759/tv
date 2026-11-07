@@ -558,32 +558,45 @@ class MainActivity : Activity() {
 
     private fun buildSetup() {
         fun field(h: String) = EditText(this).apply {
-            setTextColor(Color.WHITE); setHintTextColor(0xFF667780.toInt()); hint = h
+            setTextColor(Color.WHITE); setHintTextColor(0xFF667780.toInt()); hint = h; textSize = 16f
             setSingleLine(); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             background = focusBg(0xFF1B252C.toInt(), 0xFF3A4A54.toInt(), 0xFF24343D.toInt())
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
         }
-        fun label(t: String) = TextView(this).apply { text = t; textSize = 16f; setTextColor(0xFF8A9AA5.toInt()); setPadding(0, dp(14), 0, 0) }
+        fun label(t: String) = TextView(this).apply {
+            text = t; textSize = 13f; setTextColor(0xFF8A9AA5.toInt()); setPadding(dp(2), dp(10), 0, dp(3))
+        }
+        // компактная кнопка: ниже и мельче стандартной
+        fun small(b: Button): Button = b.apply {
+            textSize = 16f; minHeight = dp(44); minimumHeight = dp(44)
+            setPadding(dp(14), dp(4), dp(14), dp(4))
+            (layoutParams as LinearLayout.LayoutParams).topMargin = dp(6)
+        }
+        fun card(title: String) = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundBg(0xFF151D23.toInt())
+            setPadding(dp(18), dp(14), dp(18), dp(16))
+            addView(TextView(this@MainActivity).apply { text = title; textSize = 18f; setTextColor(0xFF6FE3C1.toInt()) })
+        }
+
         etPl = field("http://…/playlist.m3u")
         etEpg = field("http://…/epg.xml.gz (необязательно)")
         etTz = field("0").apply { inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED }
-        btType = tvButton("").apply {
+        etUa = field("пусто = автоподбор (VLC, okhttp, Mozilla…)")
+        btType = small(tvButton("")).apply {
             setOnClickListener { ctype = types[(types.indexOf(ctype) + 1) % types.size]; text = "Тип архива: $ctype" }
         }
-        btStart = tvButton("").apply {
+        btStart = small(tvButton("")).apply {
             setOnClickListener {
                 prefs.edit().putString("start", if (prefs.getString("start", "fav") == "fav") "all" else "fav").apply()
                 text = startLabel()
             }
         }
-        btSort = tvButton("").apply {
+        btSort = small(tvButton("")).apply {
             setOnClickListener { setSort(sorts[(sorts.indexOf(sortMode) + 1) % sorts.size]) }
         }
-        val save = tvButton("Сохранить и загрузить").apply { setOnClickListener { saveSetup() } }
-        val cancel = tvButton("Отмена").apply { setOnClickListener { if (chans.isNotEmpty()) closePanels() } }
-        etUa = field("пусто = автоподбор (VLC, okhttp, Mozilla…)")
-        tvStat = TextView(this).apply { textSize = 16f; setTextColor(0xFF6FE3C1.toInt()); setPadding(0, dp(14), 0, dp(6)) }
-        val btEpg = tvButton("Обновить программу передач").apply {
+        tvStat = TextView(this).apply { textSize = 14f; setTextColor(0xFF6FE3C1.toInt()); setPadding(dp(2), dp(10), 0, dp(2)) }
+        val btEpg = small(tvButton("Обновить программу передач")).apply {
             setOnClickListener {
                 if (chans.isEmpty()) { toast("Сначала загрузите плейлист") } else {
                     toast("Загрузка программы передач…")
@@ -593,21 +606,53 @@ class MainActivity : Activity() {
                 }
             }
         }
-        val btSrv = tvButton("Выбрать сервер из списка").apply { setOnClickListener { openServers() } }
-        val btFile = tvButton("Загрузить список / плейлист из файла…").apply { setOnClickListener { pickFile() } }
-        val btUpd = tvButton("Проверить обновления").apply { setOnClickListener { checkUpdate(true) } }
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(60), dp(30), dp(60), dp(30))
-            addView(TextView(this@MainActivity).apply { text = "Настройка IPTV  ·  версия " + (try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }) + " (сборка " + (try { Updater.installedCode(this@MainActivity) } catch (e: Exception) { 0L }) + ")"; textSize = 30f; setTextColor(Color.WHITE) })
-            addView(label("Ссылка на плейлист M3U")); addView(etPl)
-            addView(label("Ссылка на программу передач XMLTV")); addView(etEpg)
-            addView(label("Часовой пояс программы, часы от UTC (если не указан в EPG)")); addView(etTz)
+        val btSrv = small(tvButton("⇄  Выбрать сервер из списка")).apply { setOnClickListener { openServers() } }
+        val btFile = small(tvButton("Загрузить список / плейлист из файла…")).apply { setOnClickListener { pickFile() } }
+        val btUpd = small(tvButton("Проверить обновления")).apply { setOnClickListener { checkUpdate(true) } }
+
+        val left = card("Источник").apply {
+            addView(label("Плейлист M3U")); addView(etPl)
+            addView(label("Программа передач XMLTV")); addView(etEpg)
             addView(label("User-Agent (если сервер отвечает 403)")); addView(etUa)
+            addView(label("Часовой пояс программы, ч от UTC (если не указан в EPG)")); addView(etTz)
+            addView(btSrv); addView(btFile)
+        }
+        val right = card("Параметры").apply {
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
             addView(label("Порядок каналов")); addView(btSort)
             addView(label("Список при запуске")); addView(btStart)
-            addView(tvStat); addView(btEpg); addView(btSrv); addView(btFile); addView(btUpd); addView(save); addView(cancel)
+            addView(tvStat); addView(btEpg); addView(btUpd)
+        }
+        val cols = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(left, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
+            addView(right, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(8) })
+        }
+
+        val save = tvButton("Сохранить и загрузить").apply { gravity = Gravity.CENTER; setOnClickListener { saveSetup() } }
+        val cancel = tvButton("Отмена").apply { gravity = Gravity.CENTER; setOnClickListener { if (chans.isNotEmpty()) closePanels() } }
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(save, LinearLayout.LayoutParams(0, -2, 2f).apply { rightMargin = dp(8) })
+            addView(cancel, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(8) })
+        }
+
+        val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }
+        val build = try { Updater.installedCode(this) } catch (e: Exception) { 0L }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MainActivity).apply { text = "Настройка IPTV"; textSize = 26f; setTextColor(Color.WHITE) },
+                LinearLayout.LayoutParams(0, -2, 1f))
+            addView(TextView(this@MainActivity).apply { text = "версия $ver · сборка $build"; textSize = 14f; setTextColor(0xFF8A9AA5.toInt()) })
+        }
+
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(40), dp(20), dp(40), dp(20))
+            addView(header)
+            addView(cols, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+            addView(bottom, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
         }
         setup = ScrollView(this).apply { setBackgroundColor(0xFF0F1519.toInt()); visibility = View.GONE; addView(col) }
         root.addView(setup, FrameLayout.LayoutParams(-1, -1))
