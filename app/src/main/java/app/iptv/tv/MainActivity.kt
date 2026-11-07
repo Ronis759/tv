@@ -217,7 +217,7 @@ class MainActivity : Activity() {
                         if (arch != null && cc != null && arcIdx in arcCands.indices) prefs.edit().putInt("arcv_" + Iptv.hostOf(cc.url), arcCands[arcIdx].first).apply()
                     }
                     // сервер закрыл соединение с прямым эфиром — переподключаемся
-                    Player.STATE_ENDED -> if (arch == null && lastUrl.isNotEmpty()) scheduleRetry()
+                    Player.STATE_ENDED -> if (arch == null) { if (lastUrl.isNotEmpty()) scheduleRetry() } else if (readyMode != null) archEnded()
                 }
             }
 
@@ -583,7 +583,7 @@ class MainActivity : Activity() {
 
         etPl = field("http://…/playlist.m3u")
         etEpg = field("пусто = адрес из плейлиста (url-tvg)")
-        etTz = field("0").apply { inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED }
+        etTz = field("0, 3, 5.5 или 5:30").apply { inputType = InputType.TYPE_CLASS_TEXT }
         etUa = field("пусто = автоподбор (VLC, okhttp, Mozilla…)")
         btType = small(tvButton("")).apply {
             setOnClickListener { ctype = types[(types.indexOf(ctype) + 1) % types.size]; text = "Тип архива: $ctype" }
@@ -602,8 +602,8 @@ class MainActivity : Activity() {
             setOnClickListener {
                 if (chans.isEmpty()) { toast("Сначала загрузите плейлист") } else {
                     toast("Загрузка программы передач…")
-                    val tzv = etTz.text.toString().toIntOrNull() ?: 0
-                    prefs.edit().putString("epg", etEpg.text.toString().trim()).putInt("tz", tzv).apply()
+                    val tzv = parseTz(etTz.text.toString())
+                    prefs.edit().putString("epg", etEpg.text.toString().trim()).putInt("tzm", tzv).apply()
                     Thread { loadEpgNow(chans, plEpgUrl, true, tzv) }.start()
                 }
             }
@@ -617,7 +617,7 @@ class MainActivity : Activity() {
             addView(label("Плейлист M3U")); addView(etPl)
             addView(label("Программа передач XMLTV")); addView(etEpg)
             addView(label("User-Agent (если сервер отвечает 403)")); addView(etUa)
-            addView(label("Часовой пояс программы, ч от UTC (если не указан в EPG)")); addView(etTz)
+            addView(label("Часовой пояс программы, часы от UTC, можно 5.5 или 5:30 (если не указан в EPG)")); addView(etTz)
             addView(btCode); addView(btFile)
         }
         val right = card("Параметры").apply {
@@ -868,7 +868,7 @@ class MainActivity : Activity() {
     private fun openSetup() {
         etPl.setText((prefs.getString("pl", "") ?: "").ifEmpty { getString(R.string.default_playlist) })
         etEpg.setText(prefs.getString("epg", "") ?: "")
-        etTz.setText(prefs.getInt("tz", 0).toString())
+        etTz.setText(fmtTz(tzMin()))
         etUa.setText(prefs.getString("ua", ""))
         btType.text = "Тип архива: $ctype"
         btSort.text = "Порядок каналов: ${sortNames[sortMode]}"
@@ -880,7 +880,7 @@ class MainActivity : Activity() {
 
     private fun saveSetup() {
         prefs.edit().putString("pl", etPl.text.toString().trim()).putString("epg", etEpg.text.toString().trim())
-            .putInt("tz", etTz.text.toString().toIntOrNull() ?: 0).putString("ct", ctype).putString("ua", etUa.text.toString().trim()).apply()
+            .putInt("tzm", parseTz(etTz.text.toString())).putString("ct", ctype).putString("ua", etUa.text.toString().trim()).apply()
         Iptv.customUa = etUa.text.toString().trim()
         httpFactory.setUserAgent(Iptv.customUa.ifEmpty { Iptv.goodUa ?: Iptv.DEFAULT_UA })
         closePanels()
@@ -980,6 +980,35 @@ class MainActivity : Activity() {
                 loadAll(true)
             }
         }
+    }
+
+    /* ---------- часовой пояс программы (в минутах) ---------- */
+    /** Сохранённый пояс в минутах; старое значение в часах («tz») пересчитывается. */
+    private fun tzMin(): Int = if (prefs.contains("tzm")) prefs.getInt("tzm", 0) else prefs.getInt("tz", 0) * 60
+
+    /** «3», «-3», «5.5», «5,5», «5:30» → минуты от UTC (в пределах ±14 ч). */
+    private fun parseTz(s: String): Int {
+        val t = s.trim().replace(',', '.')
+        if (t.isEmpty()) return 0
+        val neg = t.startsWith("-")
+        val u = t.trimStart('+', '-')
+        val m = if (u.contains(':')) {
+            val parts = u.split(':')
+            (parts[0].toIntOrNull() ?: 0) * 60 + (parts.getOrNull(1)?.toIntOrNull() ?: 0)
+        } else Math.round((u.toDoubleOrNull() ?: 0.0) * 60).toInt()
+        return (if (neg) -m else m).coerceIn(-14 * 60, 14 * 60)
+    }
+
+    private fun fmtTz(m: Int): String =
+        if (m % 60 == 0) (m / 60).toString() else String.format(Locale.US, "%s%d:%02d", if (m < 0) "-" else "", Math.abs(m) / 60, Math.abs(m) % 60)
+
+    /** Архивная передача закончилась: включаем следующую из программы, а если её нет (или она ещё не вышла) — прямой эфир. */
+    private fun archEnded() {
+        val a = arch ?: return
+        val c = cur ?: return
+        val nx = epg[c.eid]?.firstOrNull { it.s >= a.e }
+        if (nx != null && nx.s < now()) playArch(nx)
+        else { playChan(c); toast("Архив закончился — прямой эфир") }
     }
 
     /** «О программе»: версия, описание, изменения в текущей версии, разработчик. */
@@ -1094,7 +1123,7 @@ class MainActivity : Activity() {
     private fun loadAll(force: Boolean = false) {
         val gen = ++loadGen   // результаты более ранних загрузок будут отброшены
         val pl = prefs.getString("pl", "") ?: ""
-        val tz = prefs.getInt("tz", 0)
+        val tz = tzMin()
         epg = emptyMap(); epgStatus = "загрузка…"
         toast("Загрузка плейлиста…")
         Thread {

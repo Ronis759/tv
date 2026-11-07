@@ -131,7 +131,8 @@ object Iptv {
                 l.startsWith("#EXTM3U") -> head = attrs(l)
                 l.startsWith("#EXTINF") -> {
                     a = attrs(l)
-                    name = l.substring(l.lastIndexOf(',') + 1).trim()
+                    // название — после первой запятой вне кавычек (запятая внутри названия или атрибутов не мешает)
+                    name = EXTINF_HEAD.find(l)?.let { l.substring(it.value.length).trim() } ?: ""
                     grp = null
                 }
                 l.startsWith("#EXTGRP:") -> grp = l.substring(8).trim()
@@ -162,6 +163,7 @@ object Iptv {
         return Playlist(out, (head["url-tvg"] ?: head["x-tvg-url"] ?: "").split(",")[0].trim())
     }
 
+    private val EXTINF_HEAD = Regex("""^#EXTINF:(?:[^,"]|"[^"]*")*,""")
     private val FILL = Regex("""\$?\{(\w+)\}""")
 
     fun arcUrl(c: Channel, s: Long, e: Long, def: String): String {
@@ -224,7 +226,7 @@ object Iptv {
         val c = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
         c.clear()
         c.set(g[1].toInt(), g[2].toInt() - 1, g[3].toInt(), g[4].toInt(), g[5].toInt(), if (g[6].isEmpty()) 0 else g[6].toInt())
-        var z = tz * 3600
+        var z = tz * 60   // tz — часовой пояс программы в минутах от UTC
         if (g[7].isNotEmpty()) {
             val sign = if (g[7][0] == '-') -1 else 1
             z = sign * (g[7].substring(1, 3).toInt() * 3600 + g[7].substring(3).toInt() * 60)
