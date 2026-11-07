@@ -2,6 +2,7 @@ package app.iptv.tv
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
@@ -19,6 +20,7 @@ import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
@@ -37,25 +39,39 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-class Row(val title: String, val sub: String = "", val tag: Any? = null, val dim: Boolean = false)
+class Row(val title: String, val sub: String = "", val tag: Any? = null, val dim: Boolean = false, val icon: String = "")
 
 class RowAdapter(private val ctx: Context) : BaseAdapter() {
     private var rows: List<Row> = emptyList()
+    var icons = false
     fun set(r: List<Row>) { rows = r; notifyDataSetChanged() }
     fun row(i: Int): Row = rows[i]
     override fun getCount() = rows.size
     override fun getItem(i: Int): Any = rows[i]
     override fun getItemId(i: Int) = i.toLong()
     override fun getView(i: Int, cv: View?, parent: ViewGroup?): View {
+        val d = ctx.resources.displayMetrics.density
+        fun px(x: Int) = (x * d).toInt()
         val box = (cv as? LinearLayout) ?: LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24, 14, 24, 14)
-            addView(TextView(ctx).apply { textSize = 20f; maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
-            addView(TextView(ctx).apply { textSize = 15f; maxLines = 1; setTextColor(0xFF8A9AA5.toInt()) })
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(px(12), px(8), px(12), px(8))
+            addView(ImageView(ctx).apply { scaleType = ImageView.ScaleType.FIT_CENTER }, LinearLayout.LayoutParams(px(60), px(40)))
+            val lp = LinearLayout.LayoutParams(0, -2, 1f)
+            lp.leftMargin = px(12)
+            addView(LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(ctx).apply { textSize = 20f; maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+                addView(TextView(ctx).apply { textSize = 15f; maxLines = 1; setTextColor(0xFF8A9AA5.toInt()) })
+            }, lp)
         }
         val r = rows[i]
-        (box.getChildAt(0) as TextView).apply { text = r.title; setTextColor(if (r.dim) 0xFF8A9AA5.toInt() else Color.WHITE) }
-        (box.getChildAt(1) as TextView).apply { text = r.sub; visibility = if (r.sub.isEmpty()) View.GONE else View.VISIBLE }
+        val img = box.getChildAt(0) as ImageView
+        img.visibility = if (icons) View.VISIBLE else View.GONE
+        Logos.load(img, r.icon)
+        val tx = box.getChildAt(1) as LinearLayout
+        (tx.getChildAt(0) as TextView).apply { text = r.title; setTextColor(if (r.dim) 0xFF8A9AA5.toInt() else Color.WHITE) }
+        (tx.getChildAt(1) as TextView).apply { text = r.sub; visibility = if (r.sub.isEmpty()) View.GONE else View.VISIBLE }
         return box
     }
 }
@@ -80,6 +96,10 @@ class MainActivity : Activity() {
     private lateinit var etEpg: EditText
     private lateinit var etTz: EditText
     private lateinit var btType: Button
+    private lateinit var srvPanel: LinearLayout
+    private lateinit var srvList: ListView
+    private lateinit var tvStat: TextView
+    private var epgStatus = "не загружена"
 
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("cfg", MODE_PRIVATE) }
@@ -120,7 +140,7 @@ class MainActivity : Activity() {
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 if (!triedHls && lastUrl.isNotEmpty() && !lastUrl.contains(".m3u8")) { playUrl(lastUrl, true); return }
-                toast("Ошибка воспроизведения: " + error.errorCodeName)
+                toast(if (arch != null) "Архив не воспроизводится (тип: ${archType()}) — смените тип в настройках. " + error.errorCodeName else "Ошибка воспроизведения: " + error.errorCodeName)
             }
         })
         pv = PlayerView(this)
@@ -130,14 +150,14 @@ class MainActivity : Activity() {
         pv.setOnClickListener { if (!panelOpen()) openChans() }
         root.addView(pv, FrameLayout.LayoutParams(-1, -1))
 
-        buildHud(); buildPanels(); buildSetup(); buildToast()
+        buildHud(); buildPanels(); buildSetup(); buildServers(); buildToast()
         ctype = prefs.getString("ct", "shift") ?: "shift"
         if (prefs.getString("pl", "").isNullOrEmpty()) {
             val d = getString(R.string.default_playlist)
             if (d.isNotEmpty()) {
                 prefs.edit().putString("pl", d).putString("epg", getString(R.string.default_epg)).apply()
                 loadAll()
-            } else openSetup()
+            } else if (allServers().isNotEmpty()) openServers() else openSetup()
         } else loadAll()
     }
 
@@ -194,12 +214,13 @@ class MainActivity : Activity() {
 
     private fun buildPanels() {
         grpList = lv(); chList = lv(); dayList = lv(); progList = lv()
+        (chList.adapter as RowAdapter).icons = true
         chPanel = panel(TextView(this).apply { text = "Каналы" }, grpList, chList, 0.62f, Gravity.START)
         arTitle = TextView(this)
         arPanel = panel(arTitle, dayList, progList, 0.62f, Gravity.END)
 
         grpList.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
-            if (pos == 0) openSetup() else {
+            if (pos == 0) openSetup() else if (pos == 1) openServers() else {
                 grp = ad(grpList).row(pos).title
                 renderChans(); chList.requestFocus()
             }
@@ -240,6 +261,9 @@ class MainActivity : Activity() {
         }
         val save = Button(this).apply { text = "Сохранить и загрузить"; setOnClickListener { saveSetup() } }
         val cancel = Button(this).apply { text = "Отмена"; setOnClickListener { if (chans.isNotEmpty()) closePanels() } }
+        tvStat = TextView(this).apply { textSize = 16f; setTextColor(0xFF6FE3C1.toInt()); setPadding(0, dp(14), 0, dp(6)) }
+        val btSrv = Button(this).apply { text = "Выбрать сервер из списка"; setOnClickListener { openServers() } }
+        val btFile = Button(this).apply { text = "Загрузить список / плейлист из файла…"; setOnClickListener { pickFile() } }
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(60), dp(30), dp(60), dp(30))
@@ -248,19 +272,19 @@ class MainActivity : Activity() {
             addView(label("Ссылка на программу передач XMLTV")); addView(etEpg)
             addView(label("Часовой пояс программы, часы от UTC (если не указан в EPG)")); addView(etTz)
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
-            addView(save); addView(cancel)
+            addView(tvStat); addView(btSrv); addView(btFile); addView(save); addView(cancel)
         }
         setup = ScrollView(this).apply { setBackgroundColor(0xFF0F1519.toInt()); visibility = View.GONE; addView(col) }
         root.addView(setup, FrameLayout.LayoutParams(-1, -1))
     }
 
     private fun showPanel(p: View?) {
-        chPanel.visibility = View.GONE; arPanel.visibility = View.GONE; setup.visibility = View.GONE
+        chPanel.visibility = View.GONE; arPanel.visibility = View.GONE; setup.visibility = View.GONE; srvPanel.visibility = View.GONE
         hudBox.visibility = View.GONE
         p?.visibility = View.VISIBLE
     }
     private fun closePanels() = showPanel(null)
-    private fun panelOpen() = chPanel.visibility == View.VISIBLE || arPanel.visibility == View.VISIBLE || setup.visibility == View.VISIBLE
+    private fun panelOpen() = chPanel.visibility == View.VISIBLE || arPanel.visibility == View.VISIBLE || setup.visibility == View.VISIBLE || srvPanel.visibility == View.VISIBLE
 
     private fun toast(t: String) {
         toastTv.text = t; toastTv.visibility = View.VISIBLE
@@ -279,7 +303,7 @@ class MainActivity : Activity() {
 
     /* ---------- панели ---------- */
     private fun openChans() {
-        ad(grpList).set((listOf("⚙ Настройки", "Все") + groups).map { Row(it) })
+        ad(grpList).set((listOf("⚙ Настройки", "⇄ Сервер", "Все") + groups).map { Row(it) })
         renderChans()
         showPanel(chPanel)
         chList.setSelection(shown.indexOfFirst { it === cur }.coerceAtLeast(0))
@@ -288,12 +312,12 @@ class MainActivity : Activity() {
 
     private fun renderChans() {
         shown = chans.filter { grp == "Все" || it.group == grp }
-        ad(chList).set(shown.map { Row((if (it === cur) "▶ " else "") + it.name, nowProg(it)?.title ?: "", it) })
+        ad(chList).set(shown.map { Row((if (it === cur) "▶ " else "") + it.name, nowProg(it)?.title ?: "", it, false, it.logo) })
     }
 
     private fun openArch() {
         val c = cur ?: return
-        arTitle.text = "Архив · " + c.name
+        arTitle.text = "Архив · ${c.name}  (тип: ${archType()}, дней: ${if (c.days > 0) c.days else 7}" + (if (c.days == 0 && c.ctype.isEmpty() && c.csrc.isEmpty()) ", в плейлисте нет catchup)" else ")")
         val n = minOf(if (c.days > 0) c.days else 7, 14)
         val f = SimpleDateFormat("dd.MM", Locale.getDefault())
         ad(dayList).set((0..n).map { i ->
@@ -331,6 +355,7 @@ class MainActivity : Activity() {
         etEpg.setText(prefs.getString("epg", ""))
         etTz.setText(prefs.getInt("tz", 0).toString())
         btType.text = "Тип архива: $ctype"
+        tvStat.text = "Программа передач: $epgStatus"
         showPanel(setup)
         etPl.requestFocus()
     }
@@ -339,7 +364,7 @@ class MainActivity : Activity() {
         prefs.edit().putString("pl", etPl.text.toString().trim()).putString("epg", etEpg.text.toString().trim())
             .putInt("tz", etTz.text.toString().toIntOrNull() ?: 0).putString("ct", ctype).apply()
         closePanels()
-        loadAll()
+        loadAll(true)
     }
 
     /* ---------- воспроизведение ---------- */
@@ -372,15 +397,100 @@ class MainActivity : Activity() {
         playChan(chans[((cur?.idx ?: 0) + d + chans.size) % chans.size])
     }
 
+    /* ---------- серверы и файлы ---------- */
+    private fun archType(): String {
+        val c = cur ?: return ctype
+        return c.ctype.ifEmpty { if (c.csrc.isNotEmpty()) "default" else ctype }
+    }
+
+    private fun allServers(): List<Server> {
+        val l = ArrayList<Server>()
+        try { l += Iptv.parseServers(assets.open("servers.txt").use { String(it.readBytes(), Charsets.UTF_8) }) } catch (e: Exception) {}
+        for (f in listOf(File(filesDir, "servers.txt"), File(getExternalFilesDir(null), "servers.txt"))) {
+            try { if (f.exists()) l += Iptv.parseServers(f.readText()) } catch (e: Exception) {}
+        }
+        return l.distinctBy { it.pl }
+    }
+
+    private fun buildServers() {
+        srvList = lv()
+        srvPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xF2101519.toInt())
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+            visibility = View.GONE
+            addView(TextView(this@MainActivity).apply { text = "Выберите сервер"; textSize = 24f; setTextColor(Color.WHITE); setPadding(0, 0, 0, dp(10)) })
+            addView(srvList, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        root.addView(srvPanel, FrameLayout.LayoutParams((resources.displayMetrics.widthPixels * 0.7f).toInt(), -1, Gravity.CENTER_HORIZONTAL))
+        srvList.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
+            val sv = ad(srvList).row(pos).tag as? Server
+            if (sv != null) {
+                prefs.edit().putString("pl", sv.pl).putString("epg", sv.epg).apply()
+                closePanels()
+                loadAll(true)
+            }
+        }
+    }
+
+    private fun openServers() {
+        val l = allServers()
+        if (l.isEmpty()) { toast("Список серверов пуст. Загрузите файл в настройках"); openSetup(); return }
+        ad(srvList).set(l.map { Row(it.name, Iptv.hostOf(it.pl), it) })
+        showPanel(srvPanel)
+        srvList.requestFocus()
+    }
+
+    private fun pickFile() {
+        try {
+            val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            i.addCategory(Intent.CATEGORY_OPENABLE)
+            i.type = "*/*"
+            startActivityForResult(i, 7)
+        } catch (e: Exception) {
+            toast("Нет выбора файлов. Положите servers.txt в " + getExternalFilesDir(null)?.absolutePath)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val u = data?.data
+        if (requestCode == 7 && resultCode == RESULT_OK && u != null) {
+            Thread {
+                try {
+                    val t = contentResolver.openInputStream(u)!!.use { String(it.readBytes(), Charsets.UTF_8) }.removePrefix("\uFEFF")
+                    runOnUiThread { importText(t) }
+                } catch (e: Exception) {
+                    runOnUiThread { toast("Не удалось прочитать файл") }
+                }
+            }.start()
+        }
+    }
+
+    private fun importText(t: String) {
+        if (t.contains("#EXTINF")) {
+            File(filesDir, "local.m3u").writeText(t)
+            prefs.edit().putString("pl", "local").apply()
+            closePanels()
+            loadAll(true)
+        } else {
+            File(filesDir, "servers.txt").writeText(t)
+            if (Iptv.parseServers(t).isEmpty()) toast("В файле нет адресов. Формат: Название | http://… | EPG") else openServers()
+        }
+    }
+
     /* ---------- загрузка данных ---------- */
-    private fun loadAll() {
+    private fun loadAll(force: Boolean = false) {
         val pl = prefs.getString("pl", "") ?: ""
         val tz = prefs.getInt("tz", 0)
+        epg = emptyMap(); epgStatus = "не загружена"
         toast("Загрузка плейлиста…")
         Thread {
             try {
                 val f = File(filesDir, "pl.m3u")
-                val txt = try { Iptv.text(Iptv.http(pl)).also { f.writeText(it) } }
+                val txt = if (pl == "local") File(filesDir, "local.m3u").readText()
+                else try { Iptv.text(Iptv.http(pl)).also { f.writeText(it) } }
                 catch (e: Exception) { if (f.exists()) f.readText() else throw e }
                 val list = Iptv.parseM3u(txt)
                 if (list.ch.isEmpty()) throw Exception("в плейлисте нет каналов")
@@ -392,12 +502,26 @@ class MainActivity : Activity() {
                     playChan(list.ch.getOrElse(prefs.getInt("last", 0)) { list.ch[0] })
                 }
                 val eu = (prefs.getString("epg", "") ?: "").ifEmpty { list.epgUrl }
-                if (eu.isNotEmpty()) {
+                if (eu.isEmpty()) {
+                    runOnUiThread { epgStatus = "адрес не указан"; toast("Адрес программы передач не указан — задайте его в настройках") }
+                } else {
                     try {
-                        val e = Iptv.parseEpg(Iptv.http(eu), tz)
-                        for (c in list.ch) c.eid = if (e.map.containsKey(c.id)) c.id else e.names[c.name.lowercase()] ?: ""
-                        runOnUiThread { epg = e.map; hud() }
-                    } catch (ex: Exception) { runOnUiThread { toast("Программа передач не загружена") } }
+                        val ef = File(filesDir, "epg.bin")
+                        val fresh = !force && ef.exists() && System.currentTimeMillis() - ef.lastModified() < 6 * 3600000L && prefs.getString("epgsrc", "") == eu
+                        val bytes = if (fresh) ef.readBytes() else Iptv.http(eu).also { ef.writeBytes(it); prefs.edit().putString("epgsrc", eu).apply() }
+                        val e = Iptv.parseEpg(bytes, tz)
+                        var m = 0
+                        for (c in list.ch) { c.eid = Iptv.matchEid(e, c); if (c.eid.isNotEmpty() && e.map.containsKey(c.eid)) m++ }
+                        val total = e.map.values.sumOf { it.size }
+                        runOnUiThread {
+                            epg = e.map
+                            epgStatus = "передач $total, каналов с программой $m из ${list.ch.size}"
+                            toast("Программа: $epgStatus")
+                            hud()
+                        }
+                    } catch (ex: Throwable) {
+                        runOnUiThread { epgStatus = "ошибка: " + (ex.message ?: ex.javaClass.simpleName); toast("Программа передач: $epgStatus") }
+                    }
                 }
             } catch (e: Exception) {
                 runOnUiThread { toast("Ошибка: " + e.message); if (chans.isEmpty()) openSetup() }
@@ -411,7 +535,7 @@ class MainActivity : Activity() {
         if (panelOpen()) {
             if (k == KeyEvent.KEYCODE_BACK) {
                 if (setup.visibility == View.VISIBLE && chans.isEmpty()) return super.dispatchKeyEvent(e)
-                if (e.action == KeyEvent.ACTION_UP) closePanels()
+                if (e.action == KeyEvent.ACTION_UP) { if (srvPanel.visibility == View.VISIBLE) openSetup() else closePanels() }
                 return true
             }
             return super.dispatchKeyEvent(e)

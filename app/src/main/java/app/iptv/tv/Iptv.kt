@@ -12,13 +12,14 @@ import java.util.TimeZone
 import java.util.zip.GZIPInputStream
 
 class Channel(
-    val idx: Int, val id: String, val name: String, val logo: String, val group: String,
+    val idx: Int, val id: String, val name: String, val tname: String, val logo: String, val group: String,
     val url: String, val days: Int, val ctype: String, val csrc: String
 ) { var eid: String = "" }
 
 class Prog(val s: Long, val e: Long, val title: String)
 class Playlist(val ch: List<Channel>, val epgUrl: String)
-class Epg(val map: Map<String, List<Prog>>, val names: Map<String, String>)
+class Epg(val map: Map<String, List<Prog>>, val names: Map<String, String>, val ids: Map<String, String>)
+class Server(val name: String, val pl: String, val epg: String)
 
 object Iptv {
     fun http(url: String): ByteArray {
@@ -77,7 +78,7 @@ object Iptv {
                         val days = (x["catchup-days"] ?: x["tvg-rec"] ?: head["catchup-days"])?.toIntOrNull() ?: 0
                         out.add(
                             Channel(
-                                out.size, x["tvg-id"] ?: "", name.ifEmpty { x["tvg-name"] ?: "Канал" },
+                                out.size, x["tvg-id"] ?: "", name.ifEmpty { x["tvg-name"] ?: "Канал" }, x["tvg-name"] ?: "",
                                 x["tvg-logo"] ?: "", x["group-title"] ?: grp ?: "Без группы", l, days,
                                 x["catchup"] ?: x["catchup-type"] ?: head["catchup"] ?: head["catchup-type"] ?: "",
                                 x["catchup-source"] ?: head["catchup-source"] ?: ""
@@ -140,22 +141,66 @@ object Iptv {
         return c.timeInMillis / 1000 - z
     }
 
+    fun norm(s: String) = s.lowercase().replace(Regex("[^\\p{L}\\p{N}]"), "")
+
+    fun matchEid(e: Epg, c: Channel): String {
+        if (c.id.isNotEmpty()) {
+            if (e.map.containsKey(c.id)) return c.id
+            val x = e.ids[c.id.lowercase()]
+            if (x != null) return x
+        }
+        for (n in listOf(c.tname, c.name)) {
+            if (n.isEmpty()) continue
+            val k = norm(n)
+            val a = e.names[k]
+            if (a != null) return a
+            val b = e.names[k.removeSuffix("hd")]
+            if (b != null) return b
+        }
+        return ""
+    }
+
+    fun hostOf(u: String): String = try { URL(u).host } catch (e: Exception) { u }
+
+    fun parseServers(t: String): List<Server> {
+        val out = ArrayList<Server>()
+        for (raw in t.split(Regex("\r\n|\r|\n"))) {
+            val l = raw.trim()
+            if (l.isEmpty() || l.startsWith("#") || l.startsWith("//")) continue
+            val tk = l.split("|").map { it.trim() }
+            val sv = when {
+                tk.size == 1 -> Server(hostOf(tk[0]), tk[0], "")
+                tk.size == 2 -> Server(tk[0], tk[1], "")
+                else -> Server(tk[0], tk[1], tk[2])
+            }
+            if (sv.pl.startsWith("http")) out.add(sv)
+        }
+        return out
+    }
+
     fun parseEpg(b: ByteArray, tz: Int): Epg {
         val inp: InputStream = if (isGz(b)) GZIPInputStream(ByteArrayInputStream(b)) else ByteArrayInputStream(b)
         val p = Xml.newPullParser()
         p.setInput(inp, null)
         val map = HashMap<String, MutableList<Prog>>()
         val names = HashMap<String, String>()
+        val ids = HashMap<String, String>()
+        val lo = System.currentTimeMillis() / 1000 - 14 * 86400L
+        val hi = System.currentTimeMillis() / 1000 + 3 * 86400L
         var chId = ""; var inCh = false; var pch = ""
         var s = 0L; var e = 0L; var title = ""; var inProg = false
         var ev = p.eventType
         while (ev != XmlPullParser.END_DOCUMENT) {
             if (ev == XmlPullParser.START_TAG) {
                 when (p.name) {
-                    "channel" -> { inCh = true; chId = p.getAttributeValue(null, "id") ?: "" }
+                    "channel" -> { inCh = true; chId = p.getAttributeValue(null, "id") ?: ""; ids[chId.lowercase()] = chId }
                     "display-name" -> if (inCh) {
-                        val t = p.nextText().trim().lowercase()
-                        if (t.isNotEmpty() && !names.containsKey(t)) names[t] = chId
+                        val k = norm(p.nextText())
+                        if (k.isNotEmpty()) {
+                            if (!names.containsKey(k)) names[k] = chId
+                            val k2 = k.removeSuffix("hd")
+                            if (k2.isNotEmpty() && !names.containsKey(k2)) names[k2] = chId
+                        }
                     }
                     "programme" -> {
                         inProg = true; title = ""
@@ -169,7 +214,7 @@ object Iptv {
                 when (p.name) {
                     "channel" -> inCh = false
                     "programme" -> {
-                        if (inProg && e > s) map.getOrPut(pch) { ArrayList() }.add(Prog(s, e, title))
+                        if (inProg && e > s && e > lo && s < hi) map.getOrPut(pch) { ArrayList() }.add(Prog(s, e, title))
                         inProg = false
                     }
                 }
@@ -177,6 +222,6 @@ object Iptv {
             ev = p.next()
         }
         map.values.forEach { l -> l.sortBy { it.s } }
-        return Epg(map, names)
+        return Epg(map, names, ids)
     }
 }
