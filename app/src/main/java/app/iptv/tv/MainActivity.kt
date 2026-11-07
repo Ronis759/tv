@@ -289,7 +289,7 @@ class MainActivity : Activity() {
     private fun buildPanels() {
         grpList = lv(); chList = lv(); dayList = lv(); progList = lv()
         (chList.adapter as RowAdapter).icons = true
-        chPanel = panel(TextView(this).apply { text = "Каналы   ·   зелёная / # — переместить" }, grpList, chList, 0.62f, Gravity.START)
+        chPanel = panel(TextView(this).apply { text = "Каналы   ·   удерживайте OK — меню (★ / переместить)" }, grpList, chList, 0.62f, Gravity.START)
         arTitle = TextView(this)
         arPanel = panel(arTitle, dayList, progList, 0.62f, Gravity.END)
 
@@ -324,7 +324,14 @@ class MainActivity : Activity() {
         }
         // удержание OK на канале — в избранное / из избранного
         chList.onItemLongClickListener = AdapterView.OnItemLongClickListener { _, _, pos, _ ->
-            favAt(pos)
+            if (pos in shown.indices) {
+                val c = shown[pos]
+                android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle(c.name)
+                    .setItems(arrayOf(if (isFav(c)) "★ Убрать из избранного" else "★ В избранное", "⇅ Переместить (↑/↓)")) { _, w ->
+                        if (w == 0) favAt(pos) else startMove(pos)
+                    }.show()
+            }
             true
         }
         dayList.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -395,6 +402,16 @@ class MainActivity : Activity() {
         val cancel = tvButton("Отмена").apply { setOnClickListener { if (chans.isNotEmpty()) closePanels() } }
         etUa = field("пусто = автоподбор (VLC, okhttp, Mozilla…)")
         tvStat = TextView(this).apply { textSize = 16f; setTextColor(0xFF6FE3C1.toInt()); setPadding(0, dp(14), 0, dp(6)) }
+        val btEpg = tvButton("Обновить программу передач").apply {
+            setOnClickListener {
+                if (chans.isEmpty()) { toast("Сначала загрузите плейлист") } else {
+                    toast("Загрузка программы передач…")
+                    val tzv = etTz.text.toString().toIntOrNull() ?: 0
+                    prefs.edit().putString("epg", etEpg.text.toString().trim()).putInt("tz", tzv).apply()
+                    Thread { loadEpgNow(chans, "", true, tzv) }.start()
+                }
+            }
+        }
         val btSrv = tvButton("Выбрать сервер из списка").apply { setOnClickListener { openServers() } }
         val btFile = tvButton("Загрузить список / плейлист из файла…").apply { setOnClickListener { pickFile() } }
         val col = LinearLayout(this).apply {
@@ -407,7 +424,7 @@ class MainActivity : Activity() {
             addView(label("User-Agent (если сервер отвечает 403)")); addView(etUa)
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
             addView(label("Порядок каналов")); addView(btSort)
-            addView(tvStat); addView(btSrv); addView(btFile); addView(save); addView(cancel)
+            addView(tvStat); addView(btEpg); addView(btSrv); addView(btFile); addView(save); addView(cancel)
         }
         setup = ScrollView(this).apply { setBackgroundColor(0xFF0F1519.toInt()); visibility = View.GONE; addView(col) }
         root.addView(setup, FrameLayout.LayoutParams(-1, -1))
@@ -478,8 +495,7 @@ class MainActivity : Activity() {
     private fun saveOrder() = prefs.edit().putString("order", customOrder.joinToString("\n")).apply()
 
     /** Зелёная кнопка / «#»: включает режим перемещения выбранного канала (↑/↓ — двигать, OK — готово). */
-    private fun startMove() {
-        val pos = chList.selectedItemPosition
+    private fun startMove(pos: Int = chList.selectedItemPosition) {
         if (pos < 0 || pos >= shown.size) return
         if (sortMode != "custom") {
             customOrder = ordered().map { it.name }.toMutableList(); saveOrder()
@@ -792,40 +808,58 @@ class MainActivity : Activity() {
                     toast(if (fromCache) "Сервер недоступен — показан сохранённый список: ${list.ch.size}" else "Каналов: ${list.ch.size}")
                     playChan(list.ch.getOrElse(prefs.getInt("last", 0)) { list.ch[0] })
                 }
-                val eu = (prefs.getString("epg", "") ?: "").ifEmpty { list.epgUrl }
-                if (eu.isEmpty()) {
-                    runOnUiThread { epgStatus = "адрес не указан"; toast("Адрес программы передач не указан — задайте его в настройках") }
-                } else {
-                    try {
-                        val ef = File(filesDir, "epg.bin")
-                        val fresh = !force && ef.exists() && System.currentTimeMillis() - ef.lastModified() < 6 * 3600000L && prefs.getString("epgsrc", "") == eu
-                        if (!fresh) {
-                            try {
-                                Iptv.download(eu, ef)
-                                prefs.edit().putString("epgsrc", eu).apply()
-                            } catch (dl: Exception) {
-                                // не скачалось — используем прежний файл, если он от того же источника
-                                if (!(ef.exists() && prefs.getString("epgsrc", "") == eu)) throw dl
-                            }
-                        }
-                        val e = Iptv.parseEpg(ef, tz, list.ch)
-                        var m = 0
-                        for (c in list.ch) { c.eid = Iptv.matchEid(e, c); if (c.eid.isNotEmpty() && e.map.containsKey(c.eid)) m++ }
-                        val total = e.map.values.sumOf { it.size }
-                        runOnUiThread {
-                            epg = e.map
-                            epgStatus = "передач $total, каналов с программой $m из ${list.ch.size}"
-                            toast("Программа: $epgStatus")
-                            hud()
-                        }
-                    } catch (ex: Throwable) {
-                        runOnUiThread { epgStatus = "ошибка: " + (ex.message ?: ex.javaClass.simpleName) + (if (ex.message?.contains("403") == true) " — сервер отклонил запрос; проверьте ссылку в браузере или задайте User-Agent в настройках" else ""); toast("Программа передач: $epgStatus") }
-                    }
-                }
+                loadEpgNow(list.ch, list.epgUrl, force, tz)
             } catch (e: Exception) {
                 runOnUiThread { toast("Ошибка: " + e.message); if (chans.isEmpty()) openSetup() }
             }
         }.start()
+    }
+
+    /** Загрузка и разбор программы передач (вызывать из фонового потока). Сломанный кэш или 0 совпадений — одна повторная загрузка. */
+    private fun loadEpgNow(chs: List<Channel>, plEpg: String, force: Boolean, tz: Int) {
+        val eu = (prefs.getString("epg", "") ?: "").ifEmpty { plEpg }
+        if (eu.isEmpty()) {
+            runOnUiThread { epgStatus = "адрес не указан"; toast("Адрес программы передач не указан — задайте его в настройках") }
+            return
+        }
+        val ef = File(filesDir, "epg.bin")
+        var downloaded = false
+        fun download() { Iptv.download(eu, ef); prefs.edit().putString("epgsrc", eu).apply(); downloaded = true }
+        fun parse(): Pair<Epg, Int> {
+            val e = Iptv.parseEpg(ef, tz, chs)
+            var m = 0
+            for (c in chs) { c.eid = Iptv.matchEid(e, c); if (c.eid.isNotEmpty() && e.map.containsKey(c.eid)) m++ }
+            return e to m
+        }
+        try {
+            val fresh = !force && ef.exists() && System.currentTimeMillis() - ef.lastModified() < 6 * 3600000L && prefs.getString("epgsrc", "") == eu
+            if (!fresh) {
+                try { download() } catch (dl: Exception) {
+                    // не скачалось — используем прежний файл, если он от того же источника
+                    if (!(ef.exists() && prefs.getString("epgsrc", "") == eu)) throw dl
+                }
+            }
+            var r = try { parse() } catch (ex: Exception) { if (downloaded) throw ex; null }
+            if ((r == null || r.second == 0) && !downloaded) {
+                try { download(); r = parse() } catch (ex: Exception) { if (r == null) throw ex }
+            }
+            val (e, m) = r!!
+            val total = e.map.values.sumOf { it.size }
+            runOnUiThread {
+                epg = e.map
+                epgStatus = "передач $total, каналов с программой $m из ${chs.size}"
+                toast("Программа: $epgStatus")
+                if (chPanel.visibility == View.VISIBLE && !moving) { val sp = chList.selectedItemPosition; renderChans(); chList.setSelection(sp.coerceAtLeast(0)) }
+                if (setup.visibility == View.VISIBLE) tvStat.text = "Программа передач: $epgStatus"
+                hud()
+            }
+        } catch (ex: Throwable) {
+            runOnUiThread {
+                epgStatus = "ошибка: " + (ex.message ?: ex.javaClass.simpleName) + (if (ex.message?.contains("403") == true) " — сервер отклонил запрос; проверьте ссылку в браузере или задайте User-Agent в настройках" else "")
+                toast("Программа передач: $epgStatus")
+                if (setup.visibility == View.VISIBLE) tvStat.text = "Программа передач: $epgStatus"
+            }
+        }
     }
 
     /* ---------- пульт ---------- */
