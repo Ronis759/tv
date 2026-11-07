@@ -23,7 +23,7 @@ object Logos {
         if (synchronized(bad) { bad.contains(url) }) return
         pool.execute {
             try {
-                val b = Iptv.http(url)
+                val b = Iptv.http(url, false)
                 val o = BitmapFactory.Options()
                 o.inJustDecodeBounds = true
                 BitmapFactory.decodeByteArray(b, 0, b.size, o)

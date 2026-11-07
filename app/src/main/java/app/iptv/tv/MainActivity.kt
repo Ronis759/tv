@@ -29,6 +29,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -117,6 +118,15 @@ class MainActivity : Activity() {
     private var lastUrl = ""
     private var triedHls = false
     private var ctype = "shift"
+    // автовосстановление потока
+    private var retries = 0
+    private var retryHls = false
+    private var readyMode: Boolean? = null   // null = поток ещё не заработал; true/false = с принудительным HLS или без
+    private val maxRetries = 5
+    private val retryRun = Runnable { if (lastUrl.isNotEmpty()) playUrl(lastUrl, retryHls) }
+    private val stallRun = Runnable {
+        if (player.playWhenReady && player.playbackState == Player.STATE_BUFFERING && !scheduleRetry()) toast("Поток не отвечает")
+    }
     private val hideHud = Runnable { hudBox.visibility = View.GONE }
     private val hideToast = Runnable { toastTv.visibility = View.GONE }
 
@@ -134,15 +144,41 @@ class MainActivity : Activity() {
         setContentView(root)
 
         Iptv.customUa = prefs.getString("ua", "") ?: ""
+        Iptv.goodUa = prefs.getString("gua", "")?.ifEmpty { null }
         httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(Iptv.customUa.ifEmpty { "Mozilla/5.0 (Linux; Android TV) IPTV" })
+            .setUserAgent(Iptv.customUa.ifEmpty { Iptv.goodUa ?: Iptv.DEFAULT_UA })
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000).setReadTimeoutMs(20000)
+        // Плеер получает тот же User-Agent, с которым сервер ответил на запрос плейлиста
+        Iptv.onUa = { ua ->
+            prefs.edit().putString("gua", ua).apply()
+            ui.post { if (Iptv.customUa.isEmpty()) httpFactory.setUserAgent(ua) }
+        }
+        // DefaultDataSource поверх HTTP-фабрики: кроме http(s) работают udp://, rtp://, file:, content:
         player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(httpFactory)).build()
+            .setMediaSourceFactory(DefaultMediaSourceFactory(DefaultDataSource.Factory(this, httpFactory))).build()
         player.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                ui.removeCallbacks(stallRun)
+                when (state) {
+                    Player.STATE_BUFFERING -> ui.postDelayed(stallRun, 20000)
+                    Player.STATE_READY -> { readyMode = triedHls; retries = 0 }
+                    // сервер закрыл соединение с прямым эфиром — переподключаемся
+                    Player.STATE_ENDED -> if (arch == null && lastUrl.isNotEmpty()) scheduleRetry()
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
-                if (!triedHls && lastUrl.isNotEmpty() && !lastUrl.contains(".m3u8")) { playUrl(lastUrl, true); return }
+                if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                    player.seekToDefaultPosition(); player.prepare(); return
+                }
+                // фолбэк на HLS только пока поток ни разу не заработал
+                if (readyMode == null && !triedHls && lastUrl.startsWith("http") && !lastUrl.contains(".m3u8")) { playUrl(lastUrl, true); return }
+                // архив повторяем только при проблемах сети: ошибка адреса/типа сама не пройдёт
+                val netErr = error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                    error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+                    error.errorCode == PlaybackException.ERROR_CODE_TIMEOUT
+                if ((arch == null || netErr) && scheduleRetry()) return
                 toast(if (arch != null) "Архив не воспроизводится (тип: ${archType()}) — смените тип в настройках. " + error.errorCodeName else "Ошибка воспроизведения: " + error.errorCodeName)
             }
         })
@@ -370,7 +406,7 @@ class MainActivity : Activity() {
         prefs.edit().putString("pl", etPl.text.toString().trim()).putString("epg", etEpg.text.toString().trim())
             .putInt("tz", etTz.text.toString().toIntOrNull() ?: 0).putString("ct", ctype).putString("ua", etUa.text.toString().trim()).apply()
         Iptv.customUa = etUa.text.toString().trim()
-        httpFactory.setUserAgent(Iptv.customUa.ifEmpty { "Mozilla/5.0 (Linux; Android TV) IPTV" })
+        httpFactory.setUserAgent(Iptv.customUa.ifEmpty { Iptv.goodUa ?: Iptv.DEFAULT_UA })
         closePanels()
         loadAll(true)
     }
@@ -385,17 +421,35 @@ class MainActivity : Activity() {
         player.playWhenReady = true
     }
 
+    /** Новое воспроизведение: сбрасывает отложенные повторы и состояние восстановления. */
+    private fun startUrl(url: String) {
+        ui.removeCallbacks(retryRun); ui.removeCallbacks(stallRun)
+        retries = 0; readyMode = null
+        playUrl(url)
+    }
+
+    /** Планирует переподключение с нарастающей паузой (1, 2, 4, 8, 8 с). false — попытки исчерпаны. */
+    private fun scheduleRetry(): Boolean {
+        if (lastUrl.isEmpty() || retries >= maxRetries) return false
+        retries++
+        retryHls = readyMode == true
+        toast("Связь потеряна, повтор $retries из $maxRetries…")
+        ui.removeCallbacks(retryRun)
+        ui.postDelayed(retryRun, minOf(1000L shl (retries - 1), 8000L))
+        return true
+    }
+
     private fun playChan(c: Channel) {
         cur = c; arch = null
         prefs.edit().putInt("last", c.idx).apply()
-        playUrl(c.url)
+        startUrl(c.url)
         hud()
     }
 
     private fun playArch(p: Prog) {
         val c = cur ?: return
         arch = p
-        playUrl(Iptv.arcUrl(c, p.s, p.e, ctype))
+        startUrl(Iptv.arcUrl(c, p.s, p.e, ctype))
         hud()
         toast("Архив: " + hm(p.s) + " " + p.title)
     }
@@ -496,17 +550,20 @@ class MainActivity : Activity() {
         toast("Загрузка плейлиста…")
         Thread {
             try {
-                val f = File(filesDir, "pl.m3u")
+                File(filesDir, "pl.m3u").delete()   // старый общий кэш: он не различал серверы
+                val f = File(filesDir, "pl_" + Integer.toHexString(pl.hashCode()) + ".m3u")
+                var cached = false
                 val txt = if (pl == "local") File(filesDir, "local.m3u").readText()
                 else try { Iptv.text(Iptv.http(pl)).also { f.writeText(it) } }
-                catch (e: Exception) { if (f.exists()) f.readText() else throw e }
+                catch (e: Exception) { if (f.exists()) { cached = true; f.readText() } else throw e }
+                val fromCache = cached
                 val list = Iptv.parseM3u(txt)
                 if (list.ch.isEmpty()) throw Exception("в плейлисте нет каналов")
                 runOnUiThread {
                     chans = list.ch
                     groups = list.ch.map { it.group }.distinct()
                     grp = "Все"
-                    toast("Каналов: ${list.ch.size}")
+                    toast(if (fromCache) "Сервер недоступен — показан сохранённый список: ${list.ch.size}" else "Каналов: ${list.ch.size}")
                     playChan(list.ch.getOrElse(prefs.getInt("last", 0)) { list.ch[0] })
                 }
                 val eu = (prefs.getString("epg", "") ?: "").ifEmpty { list.epgUrl }
@@ -516,8 +573,16 @@ class MainActivity : Activity() {
                     try {
                         val ef = File(filesDir, "epg.bin")
                         val fresh = !force && ef.exists() && System.currentTimeMillis() - ef.lastModified() < 6 * 3600000L && prefs.getString("epgsrc", "") == eu
-                        val bytes = if (fresh) ef.readBytes() else Iptv.http(eu).also { ef.writeBytes(it); prefs.edit().putString("epgsrc", eu).apply() }
-                        val e = Iptv.parseEpg(bytes, tz)
+                        if (!fresh) {
+                            try {
+                                Iptv.download(eu, ef)
+                                prefs.edit().putString("epgsrc", eu).apply()
+                            } catch (dl: Exception) {
+                                // не скачалось — используем прежний файл, если он от того же источника
+                                if (!(ef.exists() && prefs.getString("epgsrc", "") == eu)) throw dl
+                            }
+                        }
+                        val e = Iptv.parseEpg(ef, tz, list.ch)
                         var m = 0
                         for (c in list.ch) { c.eid = Iptv.matchEid(e, c); if (c.eid.isNotEmpty() && e.map.containsKey(c.eid)) m++ }
                         val total = e.map.values.sumOf { it.size }
@@ -585,13 +650,22 @@ class MainActivity : Activity() {
                 View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         }
     }
-    override fun onStop() { super.onStop(); player.playWhenReady = false }
+    override fun onStop() {
+        super.onStop()
+        ui.removeCallbacks(retryRun); ui.removeCallbacks(stallRun)
+        player.playWhenReady = false
+    }
     override fun onStart() {
         super.onStart()
         val c = cur
         if (c != null) {
-            if (arch == null) playUrl(c.url) else player.playWhenReady = true
+            if (arch == null) startUrl(c.url) else player.playWhenReady = true
         }
     }
-    override fun onDestroy() { super.onDestroy(); player.release() }
+    override fun onDestroy() {
+        super.onDestroy()
+        ui.removeCallbacksAndMessages(null)
+        Iptv.onUa = null
+        player.release()
+    }
 }

@@ -2,7 +2,10 @@ package app.iptv.tv
 
 import android.util.Xml
 import org.xmlpull.v1.XmlPullParser
+import java.io.BufferedInputStream
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -23,30 +26,19 @@ class Epg(val map: Map<String, List<Prog>>, val names: Map<String, String>, val 
 class Server(val name: String, val pl: String, val epg: String)
 
 object Iptv {
+    const val DEFAULT_UA = "Mozilla/5.0 (Linux; Android TV) IPTV"
     var customUa: String = ""
+    /** User-Agent, с которым сервер реально ответил (если пришлось подбирать). Передаётся и в плеер. */
+    var goodUa: String? = null
+    /** Вызывается из фонового потока, когда подобран новый рабочий User-Agent. */
+    var onUa: ((String) -> Unit)? = null
     private val UAS = listOf(
         "Mozilla/5.0", "VLC/3.0.20 LibVLC/3.0.20", "okhttp/4.12.0",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
-    private var goodUa: String? = null
 
-    fun http(url: String): ByteArray {
-        val list = if (customUa.isNotEmpty()) listOf(customUa) else listOfNotNull(goodUa) + UAS.filter { it != goodUa }
-        var last: IOException? = null
-        for (ua in list) {
-            try {
-                val b = httpOnce(url, ua)
-                if (customUa.isEmpty()) goodUa = ua
-                return b
-            } catch (e: HttpCodeException) {
-                last = e
-                if (e.code !in intArrayOf(401, 403, 406, 429, 451)) throw e
-            }
-        }
-        throw last ?: IOException("HTTP 403")
-    }
-
-    private fun httpOnce(url: String, ua: String): ByteArray {
+    /** Открывает соединение с ручной обработкой редиректов; возвращает его только при коде 200. */
+    private fun connect(url: String, ua: String): HttpURLConnection {
         var u = url
         for (i in 0 until 6) {
             val c = URL(u).openConnection() as HttpURLConnection
@@ -55,17 +47,58 @@ object Iptv {
             c.instanceFollowRedirects = false
             c.setRequestProperty("User-Agent", ua)
             c.setRequestProperty("Accept", "*/*")
-            val code = c.responseCode
+            val code = try { c.responseCode } catch (e: IOException) { c.disconnect(); throw e }
             if (code in 300..399) {
-                val l = c.getHeaderField("Location") ?: break
-                u = URL(URL(u), l).toString()
+                val l = c.getHeaderField("Location")
                 c.disconnect()
+                if (l == null) break
+                u = URL(URL(u), l).toString()
                 continue
             }
-            if (code != 200) throw HttpCodeException(code)
-            return c.inputStream.use { it.readBytes() }
+            if (code != 200) { c.disconnect(); throw HttpCodeException(code) }
+            return c
         }
         throw IOException("Не удалось загрузить: $url")
+    }
+
+    /** Перебирает User-Agent при 401/403/406/429/451 и отдаёт открытое соединение в [block]. */
+    private fun <T> withUa(url: String, remember: Boolean, block: (HttpURLConnection) -> T): T {
+        val list = if (customUa.isNotEmpty()) listOf(customUa) else listOfNotNull(goodUa) + UAS.filter { it != goodUa }
+        var last: IOException? = null
+        for ((idx, ua) in list.withIndex()) {
+            var c: HttpURLConnection? = null
+            try {
+                c = connect(url, ua)
+                val r = block(c)
+                // Запоминаем UA только если пришлось подбирать (не первый в списке)
+                if (remember && customUa.isEmpty() && idx > 0) { goodUa = ua; onUa?.invoke(ua) }
+                return r
+            } catch (e: HttpCodeException) {
+                last = e
+                if (e.code !in intArrayOf(401, 403, 406, 429, 451)) throw e
+            } finally {
+                c?.disconnect()
+            }
+        }
+        throw last ?: IOException("HTTP 403")
+    }
+
+    /** [remember] = false для побочных запросов (логотипы), чтобы они не меняли общий User-Agent. */
+    fun http(url: String, remember: Boolean = true): ByteArray =
+        withUa(url, remember) { c -> c.inputStream.use { it.readBytes() } }
+
+    /** Потоковая загрузка в файл (без хранения всего ответа в памяти). Старый файл заменяется только при успехе. */
+    fun download(url: String, dest: File) {
+        val tmp = File(dest.parentFile, dest.name + ".tmp")
+        try {
+            withUa(url, true) { c -> c.inputStream.use { i -> tmp.outputStream().use { o -> i.copyTo(o, 65536) } } }
+            if (!tmp.renameTo(dest)) {
+                dest.delete()
+                if (!tmp.renameTo(dest)) throw IOException("Не удалось сохранить файл")
+            }
+        } finally {
+            tmp.delete()
+        }
     }
 
     private fun isGz(b: ByteArray) = b.size > 2 && b[0] == 0x1f.toByte() && b[1] == 0x8b.toByte()
@@ -85,7 +118,7 @@ object Iptv {
         var a: Map<String, String>? = null
         var name = ""
         var grp: String? = null
-        for (raw in t.split(Regex("\r\n|\r|\n"))) {
+        for (raw in t.lineSequence()) {
             val l = raw.trim()
             if (l.isEmpty()) continue
             when {
@@ -203,15 +236,33 @@ object Iptv {
         return out
     }
 
-    fun parseEpg(b: ByteArray, tz: Int): Epg {
-        val inp: InputStream = if (isGz(b)) GZIPInputStream(ByteArrayInputStream(b)) else ByteArrayInputStream(b)
+    /**
+     * Потоковый разбор XMLTV из файла (gzip определяется по сигнатуре).
+     * Если передан [chans], в памяти остаются только передачи каналов плейлиста
+     * и только в окне, которое реально нужно архиву — это резко снижает расход памяти.
+     */
+    fun parseEpg(f: File, tz: Int, chans: List<Channel>?): Epg {
+        val raw = BufferedInputStream(FileInputStream(f), 65536)
+        raw.mark(2)
+        val b0 = raw.read()
+        val b1 = raw.read()
+        raw.reset()
+        val inp: InputStream = if (b0 == 0x1f && b1 == 0x8b) GZIPInputStream(raw, 65536) else raw
+        return inp.use { parseEpgStream(it, tz, chans) }
+    }
+
+    private fun parseEpgStream(inp: InputStream, tz: Int, chans: List<Channel>?): Epg {
         val p = Xml.newPullParser()
         p.setInput(inp, null)
         val map = HashMap<String, MutableList<Prog>>()
         val names = HashMap<String, String>()
         val ids = HashMap<String, String>()
-        val lo = System.currentTimeMillis() / 1000 - 14 * 86400L
-        val hi = System.currentTimeMillis() / 1000 + 3 * 86400L
+        val titles = HashMap<String, String>()
+        val nowS = System.currentTimeMillis() / 1000
+        val keepDays = (chans?.maxOfOrNull { if (it.days > 0) it.days else 7 } ?: 14).coerceIn(1, 14)
+        val lo = nowS - keepDays * 86400L
+        val hi = nowS + 2 * 86400L
+        var wanted: Set<String>? = null
         var chId = ""; var inCh = false; var pch = ""
         var s = 0L; var e = 0L; var title = ""; var inProg = false
         var ev = p.eventType
@@ -228,6 +279,11 @@ object Iptv {
                         }
                     }
                     "programme" -> {
+                        if (chans != null && wanted == null) {
+                            // Список каналов XMLTV уже прочитан — определяем, чьи передачи нужны
+                            val tmp = Epg(map, names, ids)
+                            wanted = chans.mapNotNullTo(HashSet<String>()) { c -> matchEid(tmp, c).takeIf { it.isNotEmpty() } }
+                        }
                         inProg = true; title = ""
                         pch = p.getAttributeValue(null, "channel") ?: ""
                         s = xt(p.getAttributeValue(null, "start"), tz)
@@ -239,7 +295,11 @@ object Iptv {
                 when (p.name) {
                     "channel" -> inCh = false
                     "programme" -> {
-                        if (inProg && e > s && e > lo && s < hi) map.getOrPut(pch) { ArrayList() }.add(Prog(s, e, title))
+                        val w = wanted
+                        if (inProg && e > s && e > lo && s < hi && (w == null || pch in w)) {
+                            val t = titles.getOrPut(title) { title }
+                            map.getOrPut(pch) { ArrayList() }.add(Prog(s, e, t))
+                        }
                         inProg = false
                     }
                 }
