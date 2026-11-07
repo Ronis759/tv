@@ -1,4 +1,4 @@
-# IPTV ТВ (Android TV / ТВ-бокс)
+# Noxis IPTV (Android TV / ТВ-бокс)
 
 Нативное приложение: Kotlin + Media3 ExoPlayer. Играет http/https, HLS и MPEG-TS без ограничений CORS, а также udp:// (multicast) и rtsp://.
 

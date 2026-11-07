@@ -609,6 +609,7 @@ class MainActivity : Activity() {
         val btCode = small(tvButton("Ввести секретный код")).apply { setOnClickListener { askCode() } }
         val btFile = small(tvButton("Загрузить список / плейлист из файла…")).apply { setOnClickListener { pickFile() } }
         val btUpd = small(tvButton("Проверить обновления")).apply { setOnClickListener { checkUpdate(true) } }
+        val btAbout = small(tvButton("О программе")).apply { setOnClickListener { showAbout() } }
 
         val left = card("Источник").apply {
             addView(label("Плейлист M3U")); addView(etPl)
@@ -621,7 +622,7 @@ class MainActivity : Activity() {
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
             addView(label("Порядок каналов")); addView(btSort)
             addView(label("Список при запуске")); addView(btStart)
-            addView(tvStat); addView(btEpg); addView(btUpd)
+            addView(tvStat); addView(btEpg); addView(btUpd); addView(btAbout)
         }
         val cols = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -642,7 +643,7 @@ class MainActivity : Activity() {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(TextView(this@MainActivity).apply { text = "Настройка IPTV"; textSize = 26f; setTextColor(Color.WHITE) },
+            addView(TextView(this@MainActivity).apply { text = getString(R.string.app_name) + " · настройки"; textSize = 26f; setTextColor(Color.WHITE) },
                 LinearLayout.LayoutParams(0, -2, 1f))
             addView(TextView(this@MainActivity).apply { text = "версия $ver · сборка $build"; textSize = 14f; setTextColor(0xFF8A9AA5.toInt()) })
         }
@@ -977,6 +978,33 @@ class MainActivity : Activity() {
                 loadAll(true)
             }
         }
+    }
+
+    /** «О программе»: версия, описание, изменения в текущей версии, разработчик. */
+    private fun showAbout() {
+        val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }
+        val build = try { Updater.installedCode(this) } catch (e: Exception) { 0L }
+        fun tx(t: String, size: Float, color: Int, top: Int = 0) = TextView(this).apply {
+            text = t; textSize = size; setTextColor(color); setPadding(0, dp(top), 0, 0)
+        }
+        val gray = 0xFF8A9AA5.toInt()
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+            addView(tx("Версия $ver · сборка $build", 17f, 0xFF6FE3C1.toInt()))
+            addView(tx("Разработчик: " + getString(R.string.about_dev), 16f, Color.WHITE, 4))
+            addView(tx("О ПРОГРАММЕ", 12f, gray, 16))
+            addView(tx(getString(R.string.about_desc), 16f, Color.WHITE, 3))
+            addView(tx("ЧТО НОВОГО В ВЕРСИИ $ver", 12f, gray, 16))
+            addView(tx(getString(R.string.about_changes), 16f, Color.WHITE, 3))
+        }
+        // фокусируемый ScrollView: на пульте текст прокручивается стрелками
+        val sv = ScrollView(this).apply { isFocusable = true; addView(col) }
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle(getString(R.string.app_name))
+            .setView(sv)
+            .setPositiveButton("Закрыть", null)
+            .show()
     }
 
     /** Окно ввода секретного кода: верный код прописывает адрес плейлиста и сразу загружает его. */
