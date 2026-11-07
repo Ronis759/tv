@@ -96,6 +96,8 @@ class MainActivity : Activity() {
     private lateinit var etEpg: EditText
     private lateinit var etTz: EditText
     private lateinit var btType: Button
+    private lateinit var httpFactory: DefaultHttpDataSource.Factory
+    private lateinit var etUa: EditText
     private lateinit var srvPanel: LinearLayout
     private lateinit var srvList: ListView
     private lateinit var tvStat: TextView
@@ -131,12 +133,13 @@ class MainActivity : Activity() {
         root.setBackgroundColor(Color.BLACK)
         setContentView(root)
 
-        val http = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android TV) IPTV")
+        Iptv.customUa = prefs.getString("ua", "") ?: ""
+        httpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(Iptv.customUa.ifEmpty { "Mozilla/5.0 (Linux; Android TV) IPTV" })
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000).setReadTimeoutMs(20000)
         player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(http)).build()
+            .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(httpFactory)).build()
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 if (!triedHls && lastUrl.isNotEmpty() && !lastUrl.contains(".m3u8")) { playUrl(lastUrl, true); return }
@@ -261,6 +264,7 @@ class MainActivity : Activity() {
         }
         val save = Button(this).apply { text = "Сохранить и загрузить"; setOnClickListener { saveSetup() } }
         val cancel = Button(this).apply { text = "Отмена"; setOnClickListener { if (chans.isNotEmpty()) closePanels() } }
+        etUa = field("пусто = автоподбор (VLC, okhttp, Mozilla…)")
         tvStat = TextView(this).apply { textSize = 16f; setTextColor(0xFF6FE3C1.toInt()); setPadding(0, dp(14), 0, dp(6)) }
         val btSrv = Button(this).apply { text = "Выбрать сервер из списка"; setOnClickListener { openServers() } }
         val btFile = Button(this).apply { text = "Загрузить список / плейлист из файла…"; setOnClickListener { pickFile() } }
@@ -271,6 +275,7 @@ class MainActivity : Activity() {
             addView(label("Ссылка на плейлист M3U")); addView(etPl)
             addView(label("Ссылка на программу передач XMLTV")); addView(etEpg)
             addView(label("Часовой пояс программы, часы от UTC (если не указан в EPG)")); addView(etTz)
+            addView(label("User-Agent (если сервер отвечает 403)")); addView(etUa)
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
             addView(tvStat); addView(btSrv); addView(btFile); addView(save); addView(cancel)
         }
@@ -354,6 +359,7 @@ class MainActivity : Activity() {
         etPl.setText(prefs.getString("pl", ""))
         etEpg.setText(prefs.getString("epg", ""))
         etTz.setText(prefs.getInt("tz", 0).toString())
+        etUa.setText(prefs.getString("ua", ""))
         btType.text = "Тип архива: $ctype"
         tvStat.text = "Программа передач: $epgStatus"
         showPanel(setup)
@@ -362,7 +368,9 @@ class MainActivity : Activity() {
 
     private fun saveSetup() {
         prefs.edit().putString("pl", etPl.text.toString().trim()).putString("epg", etEpg.text.toString().trim())
-            .putInt("tz", etTz.text.toString().toIntOrNull() ?: 0).putString("ct", ctype).apply()
+            .putInt("tz", etTz.text.toString().toIntOrNull() ?: 0).putString("ct", ctype).putString("ua", etUa.text.toString().trim()).apply()
+        Iptv.customUa = etUa.text.toString().trim()
+        httpFactory.setUserAgent(Iptv.customUa.ifEmpty { "Mozilla/5.0 (Linux; Android TV) IPTV" })
         closePanels()
         loadAll(true)
     }
@@ -520,7 +528,7 @@ class MainActivity : Activity() {
                             hud()
                         }
                     } catch (ex: Throwable) {
-                        runOnUiThread { epgStatus = "ошибка: " + (ex.message ?: ex.javaClass.simpleName); toast("Программа передач: $epgStatus") }
+                        runOnUiThread { epgStatus = "ошибка: " + (ex.message ?: ex.javaClass.simpleName) + (if (ex.message?.contains("403") == true) " — сервер отклонил запрос; проверьте ссылку в браузере или задайте User-Agent в настройках" else ""); toast("Программа передач: $epgStatus") }
                     }
                 }
             } catch (e: Exception) {

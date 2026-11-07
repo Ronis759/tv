@@ -18,18 +18,43 @@ class Channel(
 
 class Prog(val s: Long, val e: Long, val title: String)
 class Playlist(val ch: List<Channel>, val epgUrl: String)
+class HttpCodeException(val code: Int) : IOException("HTTP $code")
 class Epg(val map: Map<String, List<Prog>>, val names: Map<String, String>, val ids: Map<String, String>)
 class Server(val name: String, val pl: String, val epg: String)
 
 object Iptv {
+    var customUa: String = ""
+    private val UAS = listOf(
+        "Mozilla/5.0", "VLC/3.0.20 LibVLC/3.0.20", "okhttp/4.12.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    private var goodUa: String? = null
+
     fun http(url: String): ByteArray {
+        val list = if (customUa.isNotEmpty()) listOf(customUa) else listOfNotNull(goodUa) + UAS.filter { it != goodUa }
+        var last: IOException? = null
+        for (ua in list) {
+            try {
+                val b = httpOnce(url, ua)
+                if (customUa.isEmpty()) goodUa = ua
+                return b
+            } catch (e: HttpCodeException) {
+                last = e
+                if (e.code !in intArrayOf(401, 403, 406, 429, 451)) throw e
+            }
+        }
+        throw last ?: IOException("HTTP 403")
+    }
+
+    private fun httpOnce(url: String, ua: String): ByteArray {
         var u = url
         for (i in 0 until 6) {
             val c = URL(u).openConnection() as HttpURLConnection
             c.connectTimeout = 15000
             c.readTimeout = 40000
             c.instanceFollowRedirects = false
-            c.setRequestProperty("User-Agent", "Mozilla/5.0")
+            c.setRequestProperty("User-Agent", ua)
+            c.setRequestProperty("Accept", "*/*")
             val code = c.responseCode
             if (code in 300..399) {
                 val l = c.getHeaderField("Location") ?: break
@@ -37,7 +62,7 @@ object Iptv {
                 c.disconnect()
                 continue
             }
-            if (code != 200) throw IOException("HTTP $code")
+            if (code != 200) throw HttpCodeException(code)
             return c.inputStream.use { it.readBytes() }
         }
         throw IOException("Не удалось загрузить: $url")
