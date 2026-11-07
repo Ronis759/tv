@@ -402,7 +402,7 @@ class MainActivity : Activity() {
         chTitle = TextView(this).apply { textSize = 20f; maxLines = 2; text = "Каналы   ·   программа: $epgStatus" }
         chPanel = panel(chTitle, grpList, chList, 0.43f, Gravity.START)
         arTitle = TextView(this)
-        arPanel = panel(arTitle, dayList, progList, 0.62f, Gravity.END)
+        arPanel = panel(arTitle, dayList, progList, 0.57f, Gravity.END)
 
         // левая колонка (настройки и группы): узкая, со значками; раскрывается, когда в неё переходит фокус
         setGroupsExpanded(false)
@@ -727,7 +727,8 @@ class MainActivity : Activity() {
         gmList.requestFocus()
     }
 
-    private fun openArch(ch: Channel? = cur) {
+    /** [keepChannels] — телепрограмма открывается справа от списка каналов, список остаётся на экране. */
+    private fun openArch(ch: Channel? = cur, keepChannels: Boolean = false) {
         val c = ch ?: return
         guide = c
         arTitle.text = "Архив · ${c.name}  (тип: ${archType(c)}, дней: ${if (c.days > 0) c.days else 7}" + (if (c.days == 0 && c.ctype.isEmpty() && c.csrc.isEmpty()) ", в плейлисте нет catchup)" else ")")
@@ -737,7 +738,8 @@ class MainActivity : Activity() {
             Row(when (i) { 0 -> "Сегодня"; 1 -> "Вчера"; else -> f.format(Date(System.currentTimeMillis() - i * 86400000L)) })
         })
         dayOff = 0
-        showPanel(arPanel)
+        if (keepChannels) { hudBox.visibility = View.GONE; seekBox.visibility = View.GONE; arPanel.visibility = View.VISIBLE }
+        else showPanel(arPanel)
         renderProgs()
         progList.requestFocus()
     }
@@ -1012,6 +1014,14 @@ class MainActivity : Activity() {
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         val k = e.keyCode
         if (panelOpen()) {
+            // телепрограмма рядом со списком каналов: ← из списка дней или «Назад» возвращает к выбору канала
+            if (arPanel.visibility == View.VISIBLE && chPanel.visibility == View.VISIBLE &&
+                (k == KeyEvent.KEYCODE_BACK || (k == KeyEvent.KEYCODE_DPAD_LEFT && dayList.hasFocus()))) {
+                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0 || (k == KeyEvent.KEYCODE_BACK && e.action == KeyEvent.ACTION_UP)) {
+                    if (arPanel.visibility == View.VISIBLE) { arPanel.visibility = View.GONE; chList.requestFocus() }
+                }
+                return true
+            }
             if (moving) {
                 if (chPanel.visibility != View.VISIBLE) moving = false
                 else {
@@ -1041,7 +1051,7 @@ class MainActivity : Activity() {
             }
             // → на выбранном канале в списке — телепрограмма и архив этого канала
             if (chPanel.visibility == View.VISIBLE && chList.hasFocus() && k == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) shown.getOrNull(chList.selectedItemPosition)?.let { openArch(it) }
+                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) shown.getOrNull(chList.selectedItemPosition)?.let { openArch(it, true) }
                 return true
             }
             if (chPanel.visibility == View.VISIBLE && chList.hasFocus() && (k == KeyEvent.KEYCODE_PROG_GREEN || k == KeyEvent.KEYCODE_POUND)) {
