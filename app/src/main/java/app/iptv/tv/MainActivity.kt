@@ -110,6 +110,7 @@ class MainActivity : Activity() {
     private lateinit var gmPanel: LinearLayout
     private lateinit var gmList: ListView
     private var epgStatus = "не загружена"
+    private var plEpgUrl = ""   // адрес программы из заголовка плейлиста (url-tvg)
 
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("cfg", MODE_PRIVATE) }
@@ -408,7 +409,7 @@ class MainActivity : Activity() {
                     toast("Загрузка программы передач…")
                     val tzv = etTz.text.toString().toIntOrNull() ?: 0
                     prefs.edit().putString("epg", etEpg.text.toString().trim()).putInt("tz", tzv).apply()
-                    Thread { loadEpgNow(chans, "", true, tzv) }.start()
+                    Thread { loadEpgNow(chans, plEpgUrl, true, tzv) }.start()
                 }
             }
         }
@@ -625,8 +626,8 @@ class MainActivity : Activity() {
     }
 
     private fun openSetup() {
-        etPl.setText(prefs.getString("pl", ""))
-        etEpg.setText(prefs.getString("epg", ""))
+        etPl.setText((prefs.getString("pl", "") ?: "").ifEmpty { getString(R.string.default_playlist) })
+        etEpg.setText((prefs.getString("epg", "") ?: "").ifEmpty { plEpgUrl.ifEmpty { getString(R.string.default_epg) } })
         etTz.setText(prefs.getInt("tz", 0).toString())
         etUa.setText(prefs.getString("ua", ""))
         btType.text = "Тип архива: $ctype"
@@ -808,6 +809,7 @@ class MainActivity : Activity() {
                     toast(if (fromCache) "Сервер недоступен — показан сохранённый список: ${list.ch.size}" else "Каналов: ${list.ch.size}")
                     playChan(list.ch.getOrElse(prefs.getInt("last", 0)) { list.ch[0] })
                 }
+                plEpgUrl = list.epgUrl
                 loadEpgNow(list.ch, list.epgUrl, force, tz)
             } catch (e: Exception) {
                 runOnUiThread { toast("Ошибка: " + e.message); if (chans.isEmpty()) openSetup() }
@@ -817,7 +819,7 @@ class MainActivity : Activity() {
 
     /** Загрузка и разбор программы передач (вызывать из фонового потока). Сломанный кэш или 0 совпадений — одна повторная загрузка. */
     private fun loadEpgNow(chs: List<Channel>, plEpg: String, force: Boolean, tz: Int) {
-        val eu = (prefs.getString("epg", "") ?: "").ifEmpty { plEpg }
+        val eu = (prefs.getString("epg", "") ?: "").ifEmpty { plEpg }.ifEmpty { getString(R.string.default_epg) }
         if (eu.isEmpty()) {
             runOnUiThread { epgStatus = "адрес не указан"; toast("Адрес программы передач не указан — задайте его в настройках") }
             return
