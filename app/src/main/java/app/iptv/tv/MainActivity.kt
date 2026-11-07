@@ -26,6 +26,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.media3.common.MediaItem
@@ -117,6 +118,11 @@ class MainActivity : Activity() {
     private lateinit var srvList: ListView
     private lateinit var tvStat: TextView
     private lateinit var hudLogo: ImageView
+    private lateinit var seekBox: LinearLayout
+    private lateinit var seekBar: ProgressBar
+    private lateinit var seekT: TextView
+    private lateinit var seekL: TextView
+    private lateinit var seekR: TextView
     private lateinit var gmPanel: LinearLayout
     private lateinit var gmList: ListView
     private lateinit var chTitle: TextView
@@ -158,6 +164,10 @@ class MainActivity : Activity() {
     private val retryRun = Runnable { if (lastUrl.isNotEmpty()) playUrl(lastUrl, retryHls) }
     private val stallRun = Runnable {
         if (player.playWhenReady && player.playbackState == Player.STATE_BUFFERING && !scheduleRetry()) toast("Поток не отвечает")
+    }
+    private val hideSeek = Runnable { seekBox.visibility = View.GONE; ui.removeCallbacks(seekTick) }
+    private val seekTick: Runnable = object : Runnable {
+        override fun run() { if (seekBox.visibility == View.VISIBLE && arch != null) { updateSeek(); ui.postDelayed(this, 500) } }
     }
     private val hideHud = Runnable { hudBox.visibility = View.GONE }
     private val hideToast = Runnable { toastTv.visibility = View.GONE }
@@ -236,7 +246,7 @@ class MainActivity : Activity() {
 
         favs = HashSet(prefs.getStringSet("fav", emptySet()) ?: emptySet())
         hiddenGroups = HashSet(prefs.getStringSet("hg", emptySet()) ?: emptySet())
-        buildHud(); buildPanels(); buildSetup(); buildServers(); buildGroupMgr(); buildToast()
+        buildHud(); buildSeek(); buildPanels(); buildSetup(); buildServers(); buildGroupMgr(); buildToast()
         // тип архива по умолчанию — flussonic (один раз переводим и ранее сохранённое значение по умолчанию)
         if (prefs.getInt("ctv", 0) < 1) prefs.edit().putString("ct", "flussonic").putInt("ctv", 1).apply()
         ctype = prefs.getString("ct", "flussonic") ?: "flussonic"
@@ -280,6 +290,67 @@ class MainActivity : Activity() {
         val lp = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM)
         lp.setMargins(dp(40), 0, dp(40), dp(32))
         root.addView(hudBox, lp)
+    }
+
+    /** Панель перемотки архива: название передачи, полоса прогресса, время. */
+    private fun buildSeek() {
+        seekBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xEE101519.toInt())
+            setPadding(dp(24), dp(14), dp(24), dp(14))
+            visibility = View.GONE
+        }
+        seekT = TextView(this).apply { textSize = 18f; setTextColor(0xFF6FE3C1.toInt()); maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        seekBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000
+            progressTintList = ColorStateList.valueOf(0xFF6FE3C1.toInt())
+            progressBackgroundTintList = ColorStateList.valueOf(0xFF3A4A54.toInt())
+        }
+        seekL = TextView(this).apply { textSize = 16f; setTextColor(Color.WHITE) }
+        seekR = TextView(this).apply { textSize = 16f; setTextColor(0xFF8A9AA5.toInt()); gravity = Gravity.END }
+        val times = LinearLayout(this).apply {
+            addView(seekL, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(seekR, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        seekBox.addView(seekT)
+        seekBox.addView(seekBar, LinearLayout.LayoutParams(-1, dp(10)).apply { topMargin = dp(8); bottomMargin = dp(6) })
+        seekBox.addView(times)
+        val lp = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM)
+        lp.setMargins(dp(40), 0, dp(40), dp(32))
+        root.addView(seekBox, lp)
+    }
+
+    private fun fmtT(ms: Long): String {
+        val t = ms / 1000
+        return String.format(Locale.US, "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60)
+    }
+
+    private fun updateSeek() {
+        val a = arch ?: return
+        val total = (a.e - a.s) * 1000
+        if (total <= 0) return
+        val pos = player.currentPosition.coerceIn(0L, total)
+        seekT.text = "⏪ " + a.title + "   " + hm(a.s) + "–" + hm(a.e)
+        seekBar.progress = (pos * 1000 / total).toInt()
+        seekL.text = fmtT(pos) + "   (" + hm(a.s + pos / 1000) + ")"
+        seekR.text = fmtT(total)
+    }
+
+    private fun showSeek() {
+        if (arch == null) return
+        hudBox.visibility = View.GONE
+        updateSeek()
+        seekBox.visibility = View.VISIBLE
+        ui.removeCallbacks(hideSeek); ui.postDelayed(hideSeek, 5000)
+        ui.removeCallbacks(seekTick); ui.postDelayed(seekTick, 500)
+    }
+
+    /** Перемотка в архиве на [d] мс с показом панели перемотки. */
+    private fun seekArch(d: Long) {
+        val a = arch ?: return
+        val total = (a.e - a.s) * 1000
+        player.seekTo((player.currentPosition + d).coerceIn(0L, maxOf(0L, total - 1000)))
+        showSeek()
     }
 
     private fun buildToast() {
@@ -366,7 +437,7 @@ class MainActivity : Activity() {
                 val c = shown[pos]
                 android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
                     .setTitle(c.name)
-                    .setItems(arrayOf(if (isFav(c)) "★ Убрать из избранного" else "★ В избранное", "⇅ Переместить (↑/↓)", "⏪ Архив канала")) { _, w ->
+                    .setItems(arrayOf(if (isFav(c)) "★ Убрать из избранного" else "★ В избранное", "⇅ Переместить (↑/↓)", "↺ Архив канала")) { _, w ->
                         if (w == 0) favAt(pos) else if (w == 1) startMove(pos) else { zap = shown; playChan(c); closePanels(); openArch() }
                     }.show()
             }
@@ -479,6 +550,7 @@ class MainActivity : Activity() {
         chPanel.visibility = View.GONE; arPanel.visibility = View.GONE; setup.visibility = View.GONE; srvPanel.visibility = View.GONE
         gmPanel.visibility = View.GONE
         hudBox.visibility = View.GONE
+        seekBox.visibility = View.GONE
         p?.visibility = View.VISIBLE
     }
     private fun closePanels() = showPanel(null)
@@ -514,7 +586,7 @@ class MainActivity : Activity() {
         val hid = groups.count { it in hiddenGroups }
         val l = ArrayList<Row>()
         l.add(Row("⚙ Настройки", tag = "set", short = "⚙"))
-        l.add(Row("⏪ Архив", "канала: " + (cur?.name ?: "—"), "arc", short = "⏪"))
+        l.add(Row("↺ Архив", tag = "arc", short = "↺"))
         l.add(Row("☰ Группы…", if (hid > 0) "скрыто: $hid" else "", "mgr", short = "☰"))
         l.add(Row(G_FAV, tag = "fav", short = "★"))
         l.add(Row(G_ALL, tag = "all", short = "▤"))
@@ -721,6 +793,7 @@ class MainActivity : Activity() {
 
     private fun playChan(c: Channel) {
         cur = c; arch = null; arcCands = emptyList()
+        hideSeek.run()
         prefs.edit().putInt("last", c.idx).apply()
         startUrl(c.url)
         hud()
@@ -970,16 +1043,16 @@ class MainActivity : Activity() {
     private fun onLiveKey(k: Int) {
         when (k) {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> openChans()
-            KeyEvent.KEYCODE_DPAD_LEFT -> if (arch != null) player.seekTo(maxOf(0L, player.currentPosition - 30000)) else openArch()
-            KeyEvent.KEYCODE_DPAD_RIGHT -> if (arch != null) player.seekTo(player.currentPosition + 30000) else openArch()
+            KeyEvent.KEYCODE_DPAD_LEFT -> if (arch != null) seekArch(-30000) else openArch()
+            KeyEvent.KEYCODE_DPAD_RIGHT -> if (arch != null) seekArch(30000) else openArch()
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_PAGE_UP -> step(-1)
             KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> step(1)
             KeyEvent.KEYCODE_MENU -> openSetup()
             KeyEvent.KEYCODE_INFO -> hud()
             KeyEvent.KEYCODE_PROG_RED, KeyEvent.KEYCODE_STAR -> cur?.let { toggleFav(it); hud() }
-            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> player.playWhenReady = !player.playWhenReady
-            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> player.seekTo(player.currentPosition + 30000)
-            KeyEvent.KEYCODE_MEDIA_REWIND -> player.seekTo(maxOf(0L, player.currentPosition - 30000))
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { player.playWhenReady = !player.playWhenReady; showSeek() }
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> if (arch != null) seekArch(30000) else player.seekTo(player.currentPosition + 30000)
+            KeyEvent.KEYCODE_MEDIA_REWIND -> if (arch != null) seekArch(-30000) else player.seekTo(maxOf(0L, player.currentPosition - 30000))
         }
     }
 
