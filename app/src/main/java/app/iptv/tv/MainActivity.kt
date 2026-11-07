@@ -43,11 +43,14 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-class Row(val title: String, val sub: String = "", val tag: Any? = null, val dim: Boolean = false, val icon: String = "")
+class Row(val title: String, val sub: String = "", val tag: Any? = null, val dim: Boolean = false, val icon: String = "", val short: String = "")
 
 class RowAdapter(private val ctx: Context) : BaseAdapter() {
     private var rows: List<Row> = emptyList()
     var icons = false
+    var compact = false
+        set(v) { if (field != v) { field = v; notifyDataSetChanged() } }
+    var active = ""
     fun set(r: List<Row>) { rows = r; notifyDataSetChanged() }
     fun row(i: Int): Row = rows[i]
     override fun getCount() = rows.size
@@ -74,8 +77,15 @@ class RowAdapter(private val ctx: Context) : BaseAdapter() {
         img.visibility = if (icons) View.VISIBLE else View.GONE
         Logos.load(img, r.icon)
         val tx = box.getChildAt(1) as LinearLayout
-        (tx.getChildAt(0) as TextView).apply { text = r.title; setTextColor(if (r.dim) 0xFF8A9AA5.toInt() else Color.WHITE) }
-        (tx.getChildAt(1) as TextView).apply { text = r.sub; visibility = if (r.sub.isEmpty()) View.GONE else View.VISIBLE }
+        val comp = compact
+        box.gravity = Gravity.CENTER_VERTICAL
+        (tx.getChildAt(0) as TextView).apply {
+            text = if (comp) r.short.ifEmpty { r.title.take(1).uppercase() } else r.title
+            textSize = if (comp) 24f else 20f
+            gravity = if (comp) Gravity.CENTER_HORIZONTAL else Gravity.START
+            setTextColor(if (r.title == active && active.isNotEmpty()) 0xFF6FE3C1.toInt() else if (r.dim) 0xFF8A9AA5.toInt() else Color.WHITE)
+        }
+        (tx.getChildAt(1) as TextView).apply { text = r.sub; visibility = if (r.sub.isEmpty() || comp) View.GONE else View.VISIBLE }
         return box
     }
 }
@@ -300,6 +310,9 @@ class MainActivity : Activity() {
         arTitle = TextView(this)
         arPanel = panel(arTitle, dayList, progList, 0.62f, Gravity.END)
 
+        // левая колонка (настройки и группы): узкая, со значками; раскрывается, когда в неё переходит фокус
+        setGroupsExpanded(false)
+        grpList.onFocusChangeListener = View.OnFocusChangeListener { _, has -> setGroupsExpanded(has) }
         grpList.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
             val r = ad(grpList).row(pos)
             when (r.tag) {
@@ -308,6 +321,8 @@ class MainActivity : Activity() {
                 "mgr" -> openGroupMgr()
                 else -> {
                     grp = r.title
+                    ad(grpList).active = grp
+                    ad(grpList).notifyDataSetChanged()
                     renderChans()
                     if (shown.isEmpty()) toast(if (grp == G_FAV) "Избранное пусто. Удерживайте OK на канале" else "В группе нет каналов")
                     else chList.requestFocus()
@@ -388,6 +403,13 @@ class MainActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
     }
 
+    private fun setGroupsExpanded(on: Boolean) {
+        val lp = grpList.layoutParams as LinearLayout.LayoutParams
+        if (on) { lp.width = 0; lp.weight = 1f } else { lp.width = dp(72); lp.weight = 0f }
+        grpList.layoutParams = lp
+        ad(grpList).compact = !on
+    }
+
     private fun buildSetup() {
         fun field(h: String) = EditText(this).apply {
             setTextColor(Color.WHITE); setHintTextColor(0xFF667780.toInt()); hint = h
@@ -464,6 +486,7 @@ class MainActivity : Activity() {
 
     /* ---------- панели ---------- */
     private fun openChans() {
+        ad(grpList).active = grp
         ad(grpList).set(groupRows())
         renderChans()
         showPanel(chPanel)
@@ -474,11 +497,10 @@ class MainActivity : Activity() {
     private fun groupRows(): List<Row> {
         val hid = groups.count { it in hiddenGroups }
         val l = ArrayList<Row>()
-        l.add(Row("⚙ Настройки", tag = "set"))
-        l.add(Row("⇄ Сервер", tag = "srv"))
-        l.add(Row("☰ Группы…", if (hid > 0) "скрыто: $hid" else "", "mgr"))
-        l.add(Row(G_FAV, tag = "fav"))
-        l.add(Row(G_ALL, tag = "all"))
+        l.add(Row("⚙ Настройки", tag = "set", short = "⚙"))
+        l.add(Row("☰ Группы…", if (hid > 0) "скрыто: $hid" else "", "mgr", short = "☰"))
+        l.add(Row(G_FAV, tag = "fav", short = "★"))
+        l.add(Row(G_ALL, tag = "all", short = "▤"))
         for (g in groups) if (g !in hiddenGroups) l.add(Row(g, tag = "g"))
         return l
     }
