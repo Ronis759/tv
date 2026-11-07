@@ -156,6 +156,8 @@ class MainActivity : Activity() {
     private var lastUrl = ""
     private var arcCands: List<Pair<Int, String>> = emptyList()   // варианты ссылки на архив
     private var arcIdx = 0
+    private var guide: Channel? = null   // канал, чья телепрограмма открыта в панели архива
+    private lateinit var btStart: Button
     private var triedHls = false
     private var ctype = "flussonic"
     // автовосстановление потока
@@ -456,13 +458,13 @@ class MainActivity : Activity() {
         dayList.onItemClickListener = AdapterView.OnItemClickListener { _, _, _, _ -> progList.requestFocus() }
         progList.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
             val p = ad(progList).row(pos).tag as? Prog
-            val c = cur
+            val c = guide ?: cur
             if (p != null && c != null) {
                 val n = now()
                 when {
                     p.s > n -> toast("Эта передача ещё не вышла")
                     p.s <= n && n < p.e -> { playChan(c); closePanels() }
-                    else -> { playArch(p); closePanels() }
+                    else -> { if (cur !== c) cur = c; playArch(p); closePanels() }
                 }
             }
         }
@@ -517,6 +519,12 @@ class MainActivity : Activity() {
         btType = tvButton("").apply {
             setOnClickListener { ctype = types[(types.indexOf(ctype) + 1) % types.size]; text = "Тип архива: $ctype" }
         }
+        btStart = tvButton("").apply {
+            setOnClickListener {
+                prefs.edit().putString("start", if (prefs.getString("start", "fav") == "fav") "all" else "fav").apply()
+                text = startLabel()
+            }
+        }
         btSort = tvButton("").apply {
             setOnClickListener { setSort(sorts[(sorts.indexOf(sortMode) + 1) % sorts.size]) }
         }
@@ -546,6 +554,7 @@ class MainActivity : Activity() {
             addView(label("User-Agent (если сервер отвечает 403)")); addView(etUa)
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
             addView(label("Порядок каналов")); addView(btSort)
+            addView(label("Список при запуске")); addView(btStart)
             addView(tvStat); addView(btEpg); addView(btSrv); addView(btFile); addView(save); addView(cancel)
         }
         setup = ScrollView(this).apply { setBackgroundColor(0xFF0F1519.toInt()); visibility = View.GONE; addView(col) }
@@ -618,6 +627,8 @@ class MainActivity : Activity() {
         zap = emptyList()
         btSort.text = "Порядок каналов: ${sortNames[m]}"
     }
+
+    private fun startLabel() = "При запуске открывать: " + (if (prefs.getString("start", "fav") == "fav") "★ Избранное" else "Все каналы")
 
     private fun saveOrder() = prefs.edit().putString("order", customOrder.joinToString("\n")).apply()
 
@@ -716,9 +727,10 @@ class MainActivity : Activity() {
         gmList.requestFocus()
     }
 
-    private fun openArch() {
-        val c = cur ?: return
-        arTitle.text = "Архив · ${c.name}  (тип: ${archType()}, дней: ${if (c.days > 0) c.days else 7}" + (if (c.days == 0 && c.ctype.isEmpty() && c.csrc.isEmpty()) ", в плейлисте нет catchup)" else ")")
+    private fun openArch(ch: Channel? = cur) {
+        val c = ch ?: return
+        guide = c
+        arTitle.text = "Архив · ${c.name}  (тип: ${archType(c)}, дней: ${if (c.days > 0) c.days else 7}" + (if (c.days == 0 && c.ctype.isEmpty() && c.csrc.isEmpty()) ", в плейлисте нет catchup)" else ")")
         val n = minOf(if (c.days > 0) c.days else 7, 14)
         val f = SimpleDateFormat("dd.MM", Locale.getDefault())
         ad(dayList).set((0..n).map { i ->
@@ -731,7 +743,7 @@ class MainActivity : Activity() {
     }
 
     private fun renderProgs() {
-        val c = cur ?: return
+        val c = guide ?: cur ?: return
         val cal = Calendar.getInstance()
         cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0)
         cal.add(Calendar.DAY_OF_YEAR, -dayOff)
@@ -758,6 +770,7 @@ class MainActivity : Activity() {
         etUa.setText(prefs.getString("ua", ""))
         btType.text = "Тип архива: $ctype"
         btSort.text = "Порядок каналов: ${sortNames[sortMode]}"
+        btStart.text = startLabel()
         tvStat.text = "Программа передач: $epgStatus"
         showPanel(setup)
         etPl.requestFocus()
@@ -832,8 +845,8 @@ class MainActivity : Activity() {
     }
 
     /* ---------- серверы и файлы ---------- */
-    private fun archType(): String {
-        val c = cur ?: return ctype
+    private fun archType(ch: Channel? = cur): String {
+        val c = ch ?: return ctype
         return c.ctype.ifEmpty { if (c.csrc.isNotEmpty()) "default" else ctype }
     }
 
@@ -934,8 +947,9 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     chans = list.ch
                     groups = list.ch.map { it.group }.distinct()
-                    grp = G_ALL
-                    zap = emptyList()
+                    val startFav = prefs.getString("start", "fav") == "fav" && list.ch.any { isFav(it) }
+                    grp = if (startFav) G_FAV else G_ALL
+                    zap = if (startFav) ordered().filter { isFav(it) } else emptyList()
                     toast(if (fromCache) "Сервер недоступен — показан сохранённый список: ${list.ch.size}" else "Каналов: ${list.ch.size}")
                     playChan(list.ch.getOrElse(prefs.getInt("last", 0)) { list.ch[0] })
                 }
@@ -1023,6 +1037,11 @@ class MainActivity : Activity() {
             if (chPanel.visibility == View.VISIBLE && chList.hasFocus() &&
                 (k == KeyEvent.KEYCODE_MENU || k == KeyEvent.KEYCODE_STAR || k == KeyEvent.KEYCODE_PROG_YELLOW)) {
                 if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) favAt(chList.selectedItemPosition)
+                return true
+            }
+            // → на выбранном канале в списке — телепрограмма и архив этого канала
+            if (chPanel.visibility == View.VISIBLE && chList.hasFocus() && k == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) shown.getOrNull(chList.selectedItemPosition)?.let { openArch(it) }
                 return true
             }
             if (chPanel.visibility == View.VISIBLE && chList.hasFocus() && (k == KeyEvent.KEYCODE_PROG_GREEN || k == KeyEvent.KEYCODE_POUND)) {
