@@ -109,7 +109,9 @@ class MainActivity : Activity() {
     private lateinit var hudLogo: ImageView
     private lateinit var gmPanel: LinearLayout
     private lateinit var gmList: ListView
+    private lateinit var chTitle: TextView
     private var epgStatus = "не загружена"
+        set(v) { field = v; if (::chTitle.isInitialized) chTitle.text = "Каналы   ·   программа: $v" }
     private var plEpgUrl = ""   // адрес программы из заголовка плейлиста (url-tvg)
 
     private val ui = Handler(Looper.getMainLooper())
@@ -215,6 +217,9 @@ class MainActivity : Activity() {
         ctype = prefs.getString("ct", "flussonic") ?: "flussonic"
         sortMode = prefs.getString("sort", "list") ?: "list"
         customOrder = (prefs.getString("order", "") ?: "").split("\n").filter { it.isNotEmpty() }.toMutableList()
+        // по умолчанию — сетевой плейлист, а не локальный файл
+        if (prefs.getString("pl", "") == "local" && getString(R.string.default_playlist).isNotEmpty())
+            prefs.edit().putString("pl", getString(R.string.default_playlist)).putString("epg", getString(R.string.default_epg)).apply()
         if (prefs.getString("pl", "").isNullOrEmpty()) {
             val d = getString(R.string.default_playlist)
             if (d.isNotEmpty()) {
@@ -290,7 +295,8 @@ class MainActivity : Activity() {
     private fun buildPanels() {
         grpList = lv(); chList = lv(); dayList = lv(); progList = lv()
         (chList.adapter as RowAdapter).icons = true
-        chPanel = panel(TextView(this).apply { text = "Каналы   ·   удерживайте OK — меню (★ / переместить)" }, grpList, chList, 0.62f, Gravity.START)
+        chTitle = TextView(this).apply { textSize = 20f; maxLines = 2; text = "Каналы   ·   программа: $epgStatus" }
+        chPanel = panel(chTitle, grpList, chList, 0.62f, Gravity.START)
         arTitle = TextView(this)
         arPanel = panel(arTitle, dayList, progList, 0.62f, Gravity.END)
 
@@ -788,7 +794,7 @@ class MainActivity : Activity() {
     private fun loadAll(force: Boolean = false) {
         val pl = prefs.getString("pl", "") ?: ""
         val tz = prefs.getInt("tz", 0)
-        epg = emptyMap(); epgStatus = "не загружена"
+        epg = emptyMap(); epgStatus = "загрузка…"
         toast("Загрузка плейлиста…")
         Thread {
             try {
