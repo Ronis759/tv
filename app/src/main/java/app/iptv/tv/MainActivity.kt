@@ -392,7 +392,7 @@ class MainActivity : Activity() {
         grpList = lv(); chList = lv(); dayList = lv(); progList = lv()
         (chList.adapter as RowAdapter).icons = true
         chTitle = TextView(this).apply { textSize = 20f; maxLines = 2; text = "Каналы   ·   программа: $epgStatus" }
-        chPanel = panel(chTitle, grpList, chList, 0.62f, Gravity.START)
+        chPanel = panel(chTitle, grpList, chList, 0.43f, Gravity.START)
         arTitle = TextView(this)
         arPanel = panel(arTitle, dayList, progList, 0.62f, Gravity.END)
 
