@@ -963,7 +963,40 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    /** Загрузка и разбор программы передач (вызывать из фонового потока). Сломанный кэш или 0 совпадений — одна повторная загрузка. */
+    /** Быстрый кэш уже разобранной программы: читается за доли секунды, в отличие от разбора большого XML. */
+    private fun saveEpgCache(cf: File, key: String, src: Long, eids: List<String>, map: Map<String, List<Prog>>) {
+        val titles = LinkedHashMap<String, Int>()
+        for (l in map.values) for (p in l) titles.getOrPut(p.title) { titles.size }
+        java.io.DataOutputStream(java.io.BufferedOutputStream(java.io.FileOutputStream(cf), 65536)).use { o ->
+            o.writeUTF(key); o.writeLong(src)
+            o.writeInt(eids.size); eids.forEach { o.writeUTF(it) }
+            o.writeInt(titles.size); titles.keys.forEach { o.writeUTF(it) }
+            o.writeInt(map.size)
+            for ((id, l) in map) {
+                o.writeUTF(id); o.writeInt(l.size)
+                for (p in l) { o.writeLong(p.s); o.writeLong(p.e); o.writeInt(titles[p.title]!!) }
+            }
+        }
+    }
+
+    private fun loadEpgCache(cf: File, key: String, src: Long): Pair<List<String>, Map<String, List<Prog>>>? {
+        java.io.DataInputStream(java.io.BufferedInputStream(java.io.FileInputStream(cf), 65536)).use { i ->
+            if (i.readUTF() != key || i.readLong() != src) return null
+            val eids = List(i.readInt()) { i.readUTF() }
+            val titles = List(i.readInt()) { i.readUTF() }
+            val map = HashMap<String, List<Prog>>()
+            repeat(i.readInt()) {
+                val id = i.readUTF()
+                map[id] = List(i.readInt()) { Prog(i.readLong(), i.readLong(), titles[i.readInt()]) }
+            }
+            return eids to map
+        }
+    }
+
+    /**
+     * Загрузка программы передач (вызывать из фонового потока).
+     * Сначала мгновенно показывается кэш разобранной программы; свежий файл скачивается и разбирается только когда нужно.
+     */
     private fun loadEpgNow(chs: List<Channel>, plEpg: String, force: Boolean, tz: Int) {
         val eu = (prefs.getString("epg", "") ?: "").ifEmpty { plEpg }.ifEmpty { getString(R.string.default_epg) }
         if (eu.isEmpty()) {
@@ -971,36 +1004,51 @@ class MainActivity : Activity() {
             return
         }
         val ef = File(filesDir, "epg.bin")
+        val cf = File(filesDir, "epg.cache")
+        val key = eu + "|" + tz + "|" + chs.size + "|" + chs.joinToString("\u0001") { it.id + "\u0002" + it.name }.hashCode()
         var downloaded = false
         fun download() { Iptv.download(eu, ef); prefs.edit().putString("epgsrc", eu).apply(); downloaded = true }
-        fun parse(): Pair<Epg, Int> {
-            val e = Iptv.parseEpg(ef, tz, chs)
+        fun publish(eids: List<String>, map: Map<String, List<Prog>>): Int {
             var m = 0
-            for (c in chs) { c.eid = Iptv.matchEid(e, c); if (c.eid.isNotEmpty() && e.map.containsKey(c.eid)) m++ }
-            return e to m
-        }
-        try {
-            val fresh = !force && ef.exists() && System.currentTimeMillis() - ef.lastModified() < 6 * 3600000L && prefs.getString("epgsrc", "") == eu
-            if (!fresh) {
-                try { download() } catch (dl: Exception) {
-                    // не скачалось — используем прежний файл, если он от того же источника
-                    if (!(ef.exists() && prefs.getString("epgsrc", "") == eu)) throw dl
-                }
-            }
-            var r = try { parse() } catch (ex: Exception) { if (downloaded) throw ex; null }
-            if ((r == null || r.second == 0) && !downloaded) {
-                try { download(); r = parse() } catch (ex: Exception) { if (r == null) throw ex }
-            }
-            val (e, m) = r!!
-            val total = e.map.values.sumOf { it.size }
+            for ((i, c) in chs.withIndex()) { c.eid = eids[i]; if (c.eid.isNotEmpty() && map.containsKey(c.eid)) m++ }
+            val total = map.values.sumOf { it.size }
             runOnUiThread {
-                epg = e.map
+                epg = map
                 epgStatus = "передач $total, каналов с программой $m из ${chs.size}"
                 toast("Программа: $epgStatus")
                 if (chPanel.visibility == View.VISIBLE && !moving) { val sp = chList.selectedItemPosition; renderChans(); chList.setSelection(sp.coerceAtLeast(0)) }
                 if (setup.visibility == View.VISIBLE) tvStat.text = "Программа передач: $epgStatus"
                 hud()
             }
+            return m
+        }
+        fun parseAndPublish(): Int {
+            val e = Iptv.parseEpg(ef, tz, chs)
+            val eids = chs.map { Iptv.matchEid(e, it) }
+            val m = publish(eids, e.map)
+            try { saveEpgCache(cf, key, ef.lastModified(), eids, e.map) } catch (x: Exception) { cf.delete() }
+            return m
+        }
+        try {
+            var shownFromCache = false
+            if (!force && cf.exists() && ef.exists()) {
+                try {
+                    val c = loadEpgCache(cf, key, ef.lastModified())
+                    if (c != null && c.first.size == chs.size) { publish(c.first, c.second); shownFromCache = true }
+                } catch (x: Exception) { cf.delete() }
+            }
+            val fresh = !force && ef.exists() && System.currentTimeMillis() - ef.lastModified() < 6 * 3600000L && prefs.getString("epgsrc", "") == eu
+            if (shownFromCache && fresh) return
+            if (!fresh) {
+                try { download() } catch (dl: Exception) {
+                    // не скачалось — остаёмся на прежних данных, если они от того же источника
+                    if (shownFromCache) return
+                    if (!(ef.exists() && prefs.getString("epgsrc", "") == eu)) throw dl
+                }
+            }
+            if (shownFromCache && !downloaded) return
+            var m = try { parseAndPublish() } catch (ex: Exception) { if (downloaded) throw ex; -1 }
+            if (m <= 0 && !downloaded) { try { download(); m = parseAndPublish() } catch (ex: Exception) { if (m < 0) throw ex } }
         } catch (ex: Throwable) {
             runOnUiThread {
                 epgStatus = "ошибка: " + (ex.message ?: ex.javaClass.simpleName) + (if (ex.message?.contains("403") == true) " — сервер отклонил запрос; проверьте ссылку в браузере или задайте User-Agent в настройках" else "")
