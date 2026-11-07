@@ -599,7 +599,7 @@ class MainActivity : Activity() {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(60), dp(30), dp(60), dp(30))
-            addView(TextView(this@MainActivity).apply { text = "Настройка IPTV"; textSize = 30f; setTextColor(Color.WHITE) })
+            addView(TextView(this@MainActivity).apply { text = "Настройка IPTV  ·  версия " + (try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }) + " (сборка " + (try { Updater.installedCode(this@MainActivity) } catch (e: Exception) { 0L }) + ")"; textSize = 30f; setTextColor(Color.WHITE) })
             addView(label("Ссылка на плейлист M3U")); addView(etPl)
             addView(label("Ссылка на программу передач XMLTV")); addView(etEpg)
             addView(label("Часовой пояс программы, часы от UTC (если не указан в EPG)")); addView(etTz)
