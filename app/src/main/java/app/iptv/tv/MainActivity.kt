@@ -259,6 +259,8 @@ class MainActivity : Activity() {
         sortMode = prefs.getString("sort", "list") ?: "list"
         customOrder = (prefs.getString("order", "") ?: "").split("\n").filter { it.isNotEmpty() }.toMutableList()
         // по умолчанию — сетевой плейлист, а не локальный файл
+        // раньше адрес программы подставлялся по умолчанию; теперь он берётся из плейлиста
+        if (prefs.getString("epg", "") == "https://st.shara.club/epg/epg.xml.gz") prefs.edit().putString("epg", "").apply()
         if (prefs.getString("pl", "") == "local" && getString(R.string.default_playlist).isNotEmpty())
             prefs.edit().putString("pl", getString(R.string.default_playlist)).putString("epg", getString(R.string.default_epg)).apply()
         if (prefs.getString("pl", "").isNullOrEmpty()) {
@@ -580,7 +582,7 @@ class MainActivity : Activity() {
         }
 
         etPl = field("http://…/playlist.m3u")
-        etEpg = field("http://…/epg.xml.gz (необязательно)")
+        etEpg = field("пусто = адрес из плейлиста (url-tvg)")
         etTz = field("0").apply { inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED }
         etUa = field("пусто = автоподбор (VLC, okhttp, Mozilla…)")
         btType = small(tvButton("")).apply {
@@ -865,7 +867,7 @@ class MainActivity : Activity() {
 
     private fun openSetup() {
         etPl.setText((prefs.getString("pl", "") ?: "").ifEmpty { getString(R.string.default_playlist) })
-        etEpg.setText((prefs.getString("epg", "") ?: "").ifEmpty { plEpgUrl.ifEmpty { getString(R.string.default_epg) } })
+        etEpg.setText(prefs.getString("epg", "") ?: "")
         etTz.setText(prefs.getInt("tz", 0).toString())
         etUa.setText(prefs.getString("ua", ""))
         btType.text = "Тип архива: $ctype"
@@ -1033,9 +1035,8 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (url == null) { toast("Неверный код"); return@runOnUiThread }
-                val epgUrl = getString(R.string.default_epg)
-                prefs.edit().putString("pl", url).putString("epg", epgUrl).apply()
-                etPl.setText(url); etEpg.setText(epgUrl)
+                prefs.edit().putString("pl", url).putString("epg", "").apply()
+                etPl.setText(url); etEpg.setText("")
                 closePanels()
                 loadAll(true)
             }
@@ -1166,7 +1167,7 @@ class MainActivity : Activity() {
     private fun loadEpgNow(chs: List<Channel>, plEpg: String, force: Boolean, tz: Int, gen: Int = loadGen) {
         val eu = (prefs.getString("epg", "") ?: "").ifEmpty { plEpg }.ifEmpty { getString(R.string.default_epg) }
         if (eu.isEmpty()) {
-            runOnUiThread { epgStatus = "адрес не указан"; toast("Адрес программы передач не указан — задайте его в настройках") }
+            runOnUiThread { epgStatus = "адрес не указан"; toast("В плейлисте нет адреса программы передач (url-tvg) — его можно указать в настройках") }
             return
         }
         val ef = File(filesDir, "epg.bin")

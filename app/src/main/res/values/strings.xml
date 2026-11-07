@@ -2,11 +2,11 @@
     <string name="app_name">Noxis IPTV</string>
     <!-- Можно вписать ссылку на плейлист и EPG прямо сюда, чтобы не вводить с пульта -->
     <string name="default_playlist"></string>
-    <string name="default_epg">https://st.shara.club/epg/epg.xml.gz</string>
+    <string name="default_epg"></string>
     <!-- Репозиторий GitHub «владелец/имя» для автообновления (релизы с APK). Пусто — обновления отключены -->
     <string name="github_repo">Ronis759/tv</string>
     <!-- Раздел «О программе» -->
     <string name="about_dev">Greay</string>
     <string name="about_desc">Приложение для просмотра IPTV на Android TV и ТВ-боксах: прямой эфир, телепрограмма, архив передач, избранное, группы и свой порядок каналов, автоматическое переподключение и обновление из GitHub.</string>
-    <string name="about_changes">• Новое название — Noxis IPTV\n• Раздел «О программе» в настройках\n• Вход по секретному коду вместо списка серверов\n• Компактное меню настроек</string>
+    <string name="about_changes">• Адрес программы передач берётся из загружаемого плейлиста (url-tvg), по умолчанию не задан\n• Новые иконка и баннер Noxis IPTV\n• Раздел «О программе» и новое название</string>
 </resources>
