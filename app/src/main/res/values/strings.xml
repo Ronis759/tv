@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">IPTV ТВ</string>
     <!-- Можно вписать ссылку на плейлист и EPG прямо сюда, чтобы не вводить с пульта -->
-    <string name="default_playlist">https://list.shara.tv/tv-m3u8/Greay-</string>
+    <string name="default_playlist"></string>
     <string name="default_epg">https://st.shara.club/epg/epg.xml.gz</string>
     <!-- Репозиторий GitHub «владелец/имя» для автообновления (релизы с APK). Пусто — обновления отключены -->
     <string name="github_repo">Ronis759/tv</string>

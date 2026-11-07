@@ -266,7 +266,7 @@ class MainActivity : Activity() {
             if (d.isNotEmpty()) {
                 prefs.edit().putString("pl", d).putString("epg", getString(R.string.default_epg)).apply()
                 loadAll()
-            } else if (allServers().isNotEmpty()) openServers() else openSetup()
+            } else openSetup()
         } else loadAll()
         checkUpdate(false)
     }
@@ -606,7 +606,7 @@ class MainActivity : Activity() {
                 }
             }
         }
-        val btSrv = small(tvButton("⇄  Выбрать сервер из списка")).apply { setOnClickListener { openServers() } }
+        val btCode = small(tvButton("Ввести секретный код")).apply { setOnClickListener { askCode() } }
         val btFile = small(tvButton("Загрузить список / плейлист из файла…")).apply { setOnClickListener { pickFile() } }
         val btUpd = small(tvButton("Проверить обновления")).apply { setOnClickListener { checkUpdate(true) } }
 
@@ -615,7 +615,7 @@ class MainActivity : Activity() {
             addView(label("Программа передач XMLTV")); addView(etEpg)
             addView(label("User-Agent (если сервер отвечает 403)")); addView(etUa)
             addView(label("Часовой пояс программы, ч от UTC (если не указан в EPG)")); addView(etTz)
-            addView(btSrv); addView(btFile)
+            addView(btCode); addView(btFile)
         }
         val right = card("Параметры").apply {
             addView(label("Тип архива, если в плейлисте не указан")); addView(btType)
@@ -977,6 +977,41 @@ class MainActivity : Activity() {
                 loadAll(true)
             }
         }
+    }
+
+    /** Окно ввода секретного кода: верный код прописывает адрес плейлиста и сразу загружает его. */
+    private fun askCode() {
+        val et = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            setSingleLine(); hint = "Код"; textSize = 22f
+            setTextColor(Color.WHITE); setHintTextColor(0xFF667780.toInt())
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+        }
+        val d = android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Секретный код")
+            .setView(et)
+            .setPositiveButton("OK") { _, _ -> applyCode(et.text.toString().trim()) }
+            .setNegativeButton("Отмена", null)
+            .create()
+        d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+        d.show()
+    }
+
+    private fun applyCode(code: String) {
+        if (code.isEmpty()) return
+        toast("Проверка кода…")
+        Thread {
+            val url = Secrets.unlock(code)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (url == null) { toast("Неверный код"); return@runOnUiThread }
+                val epgUrl = getString(R.string.default_epg)
+                prefs.edit().putString("pl", url).putString("epg", epgUrl).apply()
+                etPl.setText(url); etEpg.setText(epgUrl)
+                closePanels()
+                loadAll(true)
+            }
+        }.start()
     }
 
     private fun openServers() {

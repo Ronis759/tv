@@ -1,9 +1,3 @@
 # Список серверов. Одна строка — один сервер.
 # Формат:  Название | ссылка на плейлист M3U | ссылка на программу передач (необязательно)
-# Можно просто ссылку на плейлист, без названия.
 # Строки, начинающиеся с #, игнорируются.
-#
-# Пример:
-# Мой провайдер | http://example.com/playlist.m3u | http://example.com/epg.xml.gz
-1. Greay | https://list.shara.tv/tv-m3u8/Greay- | https://st.shara.club/epg/epg.xml.gz
-2. komar01 | https://list.shara.tv/tv-m3u8/komar01- | https://st.shara.club/epg/epg.xml.gz
