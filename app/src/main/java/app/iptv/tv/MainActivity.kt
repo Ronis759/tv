@@ -98,6 +98,8 @@ class MainActivity : Activity() {
     private lateinit var hudBox: LinearLayout
     private lateinit var hudT: TextView
     private lateinit var hudP: TextView
+    private lateinit var hudN: TextView
+    private var lastHoldSeek = 0L
     private lateinit var toastTv: TextView
     private lateinit var chPanel: LinearLayout
     private lateinit var arPanel: LinearLayout
@@ -265,12 +267,14 @@ class MainActivity : Activity() {
     }
 
     /* ---------- интерфейс ---------- */
+    private fun roundBg(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = dp(16).toFloat() }
+
     private fun buildHud() {
         hudBox = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(0xDD101519.toInt())
-            setPadding(dp(24), dp(14), dp(24), dp(14))
+            background = roundBg(0xEE101519.toInt())
+            setPadding(dp(28), dp(16), dp(28), dp(16))
             visibility = View.GONE
         }
         // значок канала слева от названия; полупрозрачная подложка, чтобы читались и тёмные, и светлые логотипы
@@ -285,10 +289,12 @@ class MainActivity : Activity() {
         hudBox.addView(hudLogo, lpLogo)
         hudT = TextView(this).apply { textSize = 26f; setTextColor(Color.WHITE) }
         hudP = TextView(this).apply { textSize = 18f; setTextColor(0xFF6FE3C1.toInt()) }
-        val hudCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(hudT); addView(hudP) }
+        hudN = TextView(this).apply { textSize = 16f; setTextColor(0xFF8A9AA5.toInt()); maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        hudP.maxLines = 1; hudP.ellipsize = TextUtils.TruncateAt.END
+        val hudCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(hudT); addView(hudP); addView(hudN) }
         hudBox.addView(hudCol, LinearLayout.LayoutParams(0, -2, 1f))
         val lp = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM)
-        lp.setMargins(dp(40), 0, dp(40), dp(32))
+        lp.setMargins(dp(20), 0, dp(20), dp(28))
         root.addView(hudBox, lp)
     }
 
@@ -296,8 +302,8 @@ class MainActivity : Activity() {
     private fun buildSeek() {
         seekBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xEE101519.toInt())
-            setPadding(dp(24), dp(14), dp(24), dp(14))
+            background = roundBg(0xEE101519.toInt())
+            setPadding(dp(28), dp(16), dp(28), dp(16))
             visibility = View.GONE
         }
         seekT = TextView(this).apply { textSize = 18f; setTextColor(0xFF6FE3C1.toInt()); maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
@@ -316,7 +322,7 @@ class MainActivity : Activity() {
         seekBox.addView(seekBar, LinearLayout.LayoutParams(-1, dp(10)).apply { topMargin = dp(8); bottomMargin = dp(6) })
         seekBox.addView(times)
         val lp = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM)
-        lp.setMargins(dp(40), 0, dp(40), dp(32))
+        lp.setMargins(dp(20), 0, dp(20), dp(28))
         root.addView(seekBox, lp)
     }
 
@@ -356,7 +362,7 @@ class MainActivity : Activity() {
     private fun buildToast() {
         toastTv = TextView(this).apply {
             textSize = 18f; setTextColor(Color.WHITE)
-            setBackgroundColor(0xEE26323B.toInt())
+            background = roundBg(0xEE26323B.toInt())
             setPadding(dp(20), dp(10), dp(20), dp(10)); visibility = View.GONE
         }
         val lp = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
@@ -568,6 +574,9 @@ class MainActivity : Activity() {
         hudT.text = (if (isFav(c)) "★ " else "") + c.name + if (a != null) "  ·  архив" else ""
         Logos.load(hudLogo, c.logo, true)
         hudP.text = if (p != null) "${hm(p.s)}–${hm(p.e)}  ${p.title}" else ""
+        val nx = if (p != null) epg[c.eid]?.firstOrNull { it.s >= p.e } else null
+        hudN.text = if (nx != null) "Далее: ${hm(nx.s)}–${hm(nx.e)}  ${nx.title}" else ""
+        hudN.visibility = if (nx != null) View.VISIBLE else View.GONE
         hudBox.visibility = View.VISIBLE
         ui.removeCallbacks(hideHud); ui.postDelayed(hideHud, 4500)
     }
@@ -1030,6 +1039,11 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_REWIND,
             KeyEvent.KEYCODE_PROG_RED, KeyEvent.KEYCODE_STAR
         )
+        // «Назад» в прямом эфире — подтверждение выхода
+        if (k == KeyEvent.KEYCODE_BACK && arch == null) {
+            if (e.action == KeyEvent.ACTION_UP) confirmExit()
+            return true
+        }
         // «Назад» во время архива — возврат в прямой эфир
         if (k == KeyEvent.KEYCODE_BACK && arch != null && cur != null) {
             if (e.action == KeyEvent.ACTION_UP) { playChan(cur!!); toast("Прямой эфир") }
@@ -1037,7 +1051,31 @@ class MainActivity : Activity() {
         }
         if (k !in live) return super.dispatchKeyEvent(e)
         if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) onLiveKey(k)
+        // удержание ←/→ в архиве: непрерывная перемотка с ускорением (шаг растёт, пока кнопка зажата)
+        else if (e.action == KeyEvent.ACTION_DOWN && arch != null && (k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+            val t = android.os.SystemClock.uptimeMillis()
+            if (t - lastHoldSeek >= 250) {
+                lastHoldSeek = t
+                val hold = e.eventTime - e.downTime
+                val step = when { hold < 1500 -> 30000L; hold < 3500 -> 60000L; else -> 120000L }
+                seekArch(if (k == KeyEvent.KEYCODE_DPAD_LEFT) -step else step)
+            }
+        }
         return true
+    }
+
+    private var exitDlg: android.app.AlertDialog? = null
+
+    private fun confirmExit() {
+        if (exitDlg?.isShowing == true) return
+        exitDlg = android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Выйти из программы?")
+            .setPositiveButton("Да") { _, _ -> finish() }
+            .setNegativeButton("Нет", null)
+            .create().also {
+                it.show()
+                it.getButton(android.app.AlertDialog.BUTTON_NEGATIVE)?.requestFocus()   // по умолчанию — «Нет»
+            }
     }
 
     private fun onLiveKey(k: Int) {

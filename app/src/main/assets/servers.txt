@@ -5,3 +5,5 @@
 #
 # Пример:
 # Мой провайдер | http://example.com/playlist.m3u | http://example.com/epg.xml.gz
+1. Greay | https://list.shara.tv/tv-m3u8/Greay-k7QK7N7W | https://st.shara.club/epg/epg.xml.gz
+2. komar01 | https://list.shara.tv/tv-m3u8/komar01-HpD8tDB5 | https://st.shara.club/epg/epg.xml.gz
