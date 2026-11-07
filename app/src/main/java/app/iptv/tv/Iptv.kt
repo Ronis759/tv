@@ -17,7 +17,11 @@ import java.util.zip.GZIPInputStream
 class Channel(
     val idx: Int, val id: String, val name: String, val tname: String, val logo: String, val group: String,
     val url: String, val days: Int, val ctype: String, val csrc: String
-) { var eid: String = "" }
+) {
+    var eid: String = ""
+    /** Уникальный ключ для «своего порядка»: у дублей названия (один канал в разных группах) добавляется #2, #3… */
+    var okey: String = name
+}
 
 class Prog(val s: Long, val e: Long, val title: String)
 class Playlist(val ch: List<Channel>, val epgUrl: String)
@@ -62,8 +66,10 @@ object Iptv {
     }
 
     /** Перебирает User-Agent при 401/403/406/429/451 и отдаёт открытое соединение в [block]. */
-    private fun <T> withUa(url: String, remember: Boolean, block: (HttpURLConnection) -> T): T {
-        val list = if (customUa.isNotEmpty()) listOf(customUa) else listOfNotNull(goodUa) + UAS.filter { it != goodUa }
+    private fun <T> withUa(url: String, remember: Boolean, rotate: Boolean = true, block: (HttpURLConnection) -> T): T {
+        val list = if (customUa.isNotEmpty()) listOf(customUa)
+        else if (!rotate) listOf(goodUa ?: UAS[0])
+        else listOfNotNull(goodUa) + UAS.filter { it != goodUa }
         var last: IOException? = null
         for ((idx, ua) in list.withIndex()) {
             var c: HttpURLConnection? = null
@@ -83,9 +89,9 @@ object Iptv {
         throw last ?: IOException("HTTP 403")
     }
 
-    /** [remember] = false для побочных запросов (логотипы), чтобы они не меняли общий User-Agent. */
+    /** [remember] = false для побочных запросов (логотипы): они не меняют общий User-Agent и не перебирают их при 403. */
     fun http(url: String, remember: Boolean = true): ByteArray =
-        withUa(url, remember) { c -> c.inputStream.use { it.readBytes() } }
+        withUa(url, remember, remember) { c -> c.inputStream.use { it.readBytes() } }
 
     /** Потоковая загрузка в файл (без хранения всего ответа в памяти). Старый файл заменяется только при успехе. */
     fun download(url: String, dest: File) {
@@ -147,6 +153,12 @@ object Iptv {
                 }
             }
         }
+        val seen = HashMap<String, Int>()
+        for (c in out) {
+            val n = (seen[c.name] ?: 0) + 1
+            seen[c.name] = n
+            if (n > 1) c.okey = c.name + "#" + n
+        }
         return Playlist(out, (head["url-tvg"] ?: head["x-tvg-url"] ?: "").split(",")[0].trim())
     }
 
@@ -169,7 +181,8 @@ object Iptv {
         val type = (c.ctype.ifEmpty { if (c.csrc.isNotEmpty()) "default" else def }).lowercase()
         val url = c.url
         if (type == "append") return url + fill(c.csrc.ifEmpty { "?utc={start}&lutc={timestamp}" })
-        if (type == "default" || (c.csrc.isNotEmpty() && type != "shift" && !type.startsWith("flus") && type != "fs")) {
+        // "default" без catchup-source раньше возвращал ссылку прямого эфира; теперь такой случай идёт по общему запасному пути ниже
+        if (c.csrc.isNotEmpty() && type != "shift" && !type.startsWith("flus") && type != "fs") {
             val t = fill(c.csrc)
             return if (t.startsWith("http")) t else url + t
         }

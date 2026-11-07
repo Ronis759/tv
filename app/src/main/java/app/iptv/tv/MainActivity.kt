@@ -130,7 +130,9 @@ class MainActivity : Activity() {
     private lateinit var chTitle: TextView
     private var epgStatus = "не загружена"
         set(v) { field = v; if (::chTitle.isInitialized) chTitle.text = "Каналы   ·   программа: $v" }
-    private var plEpgUrl = ""   // адрес программы из заголовка плейлиста (url-tvg)
+    @Volatile private var loadGen = 0      // номер текущей загрузки плейлиста: устаревшие потоки ничего не публикуют
+    private var started = false            // между onStart и onStop
+    @Volatile private var plEpgUrl = ""   // адрес программы из заголовка плейлиста (url-tvg)
 
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("cfg", MODE_PRIVATE) }
@@ -616,13 +618,13 @@ class MainActivity : Activity() {
     private fun ordered(): List<Channel> = when (sortMode) {
         "az" -> chans.sortedBy { it.name.lowercase() }
         "fav" -> chans.sortedBy { if (isFav(it)) 0 else 1 }
-        "custom" -> { val pos = HashMap<String, Int>(); customOrder.forEachIndexed { i, n -> pos.putIfAbsent(n, i) }; chans.sortedBy { pos[it.name] ?: Int.MAX_VALUE } }
+        "custom" -> { val pos = HashMap<String, Int>(); customOrder.forEachIndexed { i, n -> pos.putIfAbsent(n, i) }; chans.sortedBy { pos[it.okey] ?: Int.MAX_VALUE } }
         else -> chans
     }
 
     private fun setSort(m: String) {
         sortMode = m
-        if (m == "custom" && customOrder.isEmpty()) { customOrder = chans.map { it.name }.toMutableList(); saveOrder() }
+        if (m == "custom" && customOrder.isEmpty()) { customOrder = chans.map { it.okey }.toMutableList(); saveOrder() }
         prefs.edit().putString("sort", m).apply()
         zap = emptyList()
         btSort.text = "Порядок каналов: ${sortNames[m]}"
@@ -636,11 +638,11 @@ class MainActivity : Activity() {
     private fun startMove(pos: Int = chList.selectedItemPosition) {
         if (pos < 0 || pos >= shown.size) return
         if (sortMode != "custom") {
-            customOrder = ordered().map { it.name }.toMutableList(); saveOrder()
+            customOrder = ordered().map { it.okey }.toMutableList(); saveOrder()
             setSort("custom")
         } else {
             // добавляем в свой порядок новые каналы, которых там ещё нет
-            val known = customOrder.toHashSet(); chans.forEach { if (known.add(it.name)) customOrder.add(it.name) }
+            val known = customOrder.toHashSet(); chans.forEach { if (known.add(it.okey)) customOrder.add(it.okey) }
         }
         moving = true
         renderChans(); chList.setSelection(pos)
@@ -650,7 +652,7 @@ class MainActivity : Activity() {
     private fun moveBy(d: Int) {
         val pos = chList.selectedItemPosition; val t = pos + d
         if (pos < 0 || t < 0 || t >= shown.size) return
-        val a = customOrder.indexOf(shown[pos].name); val b = customOrder.indexOf(shown[t].name)
+        val a = customOrder.indexOf(shown[pos].okey); val b = customOrder.indexOf(shown[t].okey)
         if (a < 0 || b < 0) return
         val x = customOrder[a]; customOrder[a] = customOrder[b]; customOrder[b] = x
         saveOrder(); zap = emptyList()
@@ -931,6 +933,7 @@ class MainActivity : Activity() {
 
     /* ---------- загрузка данных ---------- */
     private fun loadAll(force: Boolean = false) {
+        val gen = ++loadGen   // результаты более ранних загрузок будут отброшены
         val pl = prefs.getString("pl", "") ?: ""
         val tz = prefs.getInt("tz", 0)
         epg = emptyMap(); epgStatus = "загрузка…"
@@ -946,19 +949,24 @@ class MainActivity : Activity() {
                 val fromCache = cached
                 val list = Iptv.parseM3u(txt)
                 if (list.ch.isEmpty()) throw Exception("в плейлисте нет каналов")
+                if (gen != loadGen) return@Thread
                 runOnUiThread {
+                    if (gen != loadGen || isFinishing || isDestroyed) return@runOnUiThread
                     chans = list.ch
                     groups = list.ch.map { it.group }.distinct()
                     val startFav = prefs.getString("start", "fav") == "fav" && list.ch.any { isFav(it) }
                     grp = if (startFav) G_FAV else G_ALL
                     zap = if (startFav) ordered().filter { isFav(it) } else emptyList()
                     toast(if (fromCache) "Сервер недоступен — показан сохранённый список: ${list.ch.size}" else "Каналов: ${list.ch.size}")
-                    playChan(list.ch.getOrElse(prefs.getInt("last", 0)) { list.ch[0] })
+                    val first = list.ch.getOrElse(prefs.getInt("last", 0)) { list.ch[0] }
+                    // приложение свёрнуто — не запускаем звук в фоне, onStart сам включит выбранный канал
+                    if (started) playChan(first) else { cur = first; arch = null }
                 }
+                if (gen != loadGen) return@Thread
                 plEpgUrl = list.epgUrl
-                loadEpgNow(list.ch, list.epgUrl, force, tz)
+                loadEpgNow(list.ch, list.epgUrl, force, tz, gen)
             } catch (e: Exception) {
-                runOnUiThread { toast("Ошибка: " + e.message); if (chans.isEmpty()) openSetup() }
+                runOnUiThread { if (gen == loadGen) { toast("Ошибка: " + e.message); if (chans.isEmpty()) openSetup() } }
             }
         }.start()
     }
@@ -997,7 +1005,7 @@ class MainActivity : Activity() {
      * Загрузка программы передач (вызывать из фонового потока).
      * Сначала мгновенно показывается кэш разобранной программы; свежий файл скачивается и разбирается только когда нужно.
      */
-    private fun loadEpgNow(chs: List<Channel>, plEpg: String, force: Boolean, tz: Int) {
+    private fun loadEpgNow(chs: List<Channel>, plEpg: String, force: Boolean, tz: Int, gen: Int = loadGen) {
         val eu = (prefs.getString("epg", "") ?: "").ifEmpty { plEpg }.ifEmpty { getString(R.string.default_epg) }
         if (eu.isEmpty()) {
             runOnUiThread { epgStatus = "адрес не указан"; toast("Адрес программы передач не указан — задайте его в настройках") }
@@ -1013,6 +1021,7 @@ class MainActivity : Activity() {
             for ((i, c) in chs.withIndex()) { c.eid = eids[i]; if (c.eid.isNotEmpty() && map.containsKey(c.eid)) m++ }
             val total = map.values.sumOf { it.size }
             runOnUiThread {
+                if (gen != loadGen) return@runOnUiThread
                 epg = map
                 epgStatus = "передач $total, каналов с программой $m из ${chs.size}"
                 toast("Программа: $epgStatus")
@@ -1051,6 +1060,7 @@ class MainActivity : Activity() {
             if (m <= 0 && !downloaded) { try { download(); m = parseAndPublish() } catch (ex: Exception) { if (m < 0) throw ex } }
         } catch (ex: Throwable) {
             runOnUiThread {
+                if (gen != loadGen) return@runOnUiThread
                 epgStatus = "ошибка: " + (ex.message ?: ex.javaClass.simpleName) + (if (ex.message?.contains("403") == true) " — сервер отклонил запрос; проверьте ссылку в браузере или задайте User-Agent в настройках" else "")
                 toast("Программа передач: $epgStatus")
                 if (setup.visibility == View.VISIBLE) tvStat.text = "Программа передач: $epgStatus"
@@ -1065,9 +1075,10 @@ class MainActivity : Activity() {
             // телепрограмма рядом со списком каналов: ← из списка дней или «Назад» возвращает к выбору канала
             if (arPanel.visibility == View.VISIBLE && chPanel.visibility == View.VISIBLE &&
                 (k == KeyEvent.KEYCODE_BACK || (k == KeyEvent.KEYCODE_DPAD_LEFT && dayList.hasFocus()))) {
-                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0 || (k == KeyEvent.KEYCODE_BACK && e.action == KeyEvent.ACTION_UP)) {
-                    if (arPanel.visibility == View.VISIBLE) { arPanel.visibility = View.GONE; chList.requestFocus() }
-                }
+                // BACK обрабатываем только на отпускание (иначе ACTION_UP после скрытия панели закрыл бы и список каналов), ← — на нажатие
+                val fire = if (k == KeyEvent.KEYCODE_BACK) e.action == KeyEvent.ACTION_UP
+                else e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0
+                if (fire) { arPanel.visibility = View.GONE; chList.requestFocus() }
                 return true
             }
             if (moving) {
@@ -1183,11 +1194,13 @@ class MainActivity : Activity() {
     }
     override fun onStop() {
         super.onStop()
+        started = false
         ui.removeCallbacks(retryRun); ui.removeCallbacks(stallRun)
         player.playWhenReady = false
     }
     override fun onStart() {
         super.onStart()
+        started = true
         val c = cur
         if (c != null) {
             if (arch == null) startUrl(c.url) else player.playWhenReady = true

@@ -7,13 +7,39 @@ import android.os.Looper
 import android.util.LruCache
 import android.view.View
 import android.widget.ImageView
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.RejectedExecutionHandler
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 object Logos {
     private val cache = LruCache<String, Bitmap>(200)
-    private val pool = Executors.newFixedThreadPool(4)
     private val ui = Handler(Looper.getMainLooper())
-    private val bad = HashSet<String>()
+
+    /** url -> время (мс), до которого не пытаемся грузить снова. Long.MAX_VALUE — навсегда (404, не картинка). */
+    private val bad = HashMap<String, Long>()
+    private const val RETRY_MS = 5 * 60 * 1000L
+
+    /**
+     * Очередь ограничена и работает «последний пришёл — первый обслужен»: при быстрой прокрутке
+     * загружаются логотипы того, что сейчас на экране, а устаревшие запросы вытесняются.
+     * Вытесненный логотип подгрузится снова, когда строка вернётся на экран (getView вызывает load).
+     */
+    private val queue = object : LinkedBlockingDeque<Runnable>(48) {
+        override fun offer(e: Runnable): Boolean = offerFirst(e)
+    }
+    private val pool = ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, queue, RejectedExecutionHandler { r, ex ->
+        if (!ex.isShutdown) { queue.pollLast(); queue.offerFirst(r) }
+    })
+
+    private fun isBad(url: String): Boolean = synchronized(bad) {
+        val t = bad[url] ?: return false
+        if (System.currentTimeMillis() < t) true else { bad.remove(url); false }
+    }
+
+    private fun markBad(url: String, permanent: Boolean) = synchronized(bad) {
+        bad[url] = if (permanent) Long.MAX_VALUE else System.currentTimeMillis() + RETRY_MS
+    }
 
     /** [autoHide] = true: ImageView прячется, пока логотипа нет (нет ссылки, не загрузился), и показывается, когда он готов. */
     fun load(v: ImageView, url: String, autoHide: Boolean = false) {
@@ -23,8 +49,10 @@ object Logos {
         if (c != null) { v.setImageBitmap(c); if (autoHide) v.visibility = View.VISIBLE; return }
         v.setImageDrawable(null)
         if (autoHide) v.visibility = View.GONE
-        if (synchronized(bad) { bad.contains(url) }) return
+        if (isBad(url)) return
         pool.execute {
+            // строку уже переиспользовали под другой канал — загрузка не нужна
+            if (v.tag != url) return@execute
             try {
                 val b = Iptv.http(url, false)
                 val o = BitmapFactory.Options()
@@ -36,7 +64,7 @@ object Logos {
                 o2.inSampleSize = s
                 val bm = BitmapFactory.decodeByteArray(b, 0, b.size, o2)
                 if (bm == null) {
-                    synchronized(bad) { bad.add(url) }
+                    markBad(url, true)
                 } else {
                     cache.put(url, bm)
                     ui.post {
@@ -46,8 +74,11 @@ object Logos {
                         }
                     }
                 }
+            } catch (e: HttpCodeException) {
+                markBad(url, e.code == 404 || e.code == 410)
             } catch (e: Throwable) {
-                synchronized(bad) { bad.add(url) }
+                // сеть / таймаут / нехватка памяти — повторим позже
+                markBad(url, false)
             }
         }
     }
